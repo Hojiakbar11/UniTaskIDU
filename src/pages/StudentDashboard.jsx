@@ -1,0 +1,568 @@
+import React, { useState, useEffect } from 'react';
+import { useNavigate } from 'react-router-dom';
+import { supabase } from '../lib/supabase';
+import { 
+  LogOut, GraduationCap, Calendar, FileText, CheckCircle, 
+  Clock, AlertCircle, Loader2, X, BookOpen, User, ClipboardList, Send 
+} from 'lucide-react';
+
+export default function StudentDashboard() {
+  const navigate = useNavigate();
+  const user = JSON.parse(localStorage.getItem('unitask_user') || '{}');
+
+  // Page States
+  const [groupName, setGroupName] = useState('');
+  const [assignments, setAssignments] = useState([]);
+  const [isLoadingPage, setIsLoadingPage] = useState(true);
+  const [errorMsg, setErrorMsg] = useState('');
+  const [successMsg, setSuccessMsg] = useState('');
+
+  // Modal / Submit States
+  const [isModalOpen, setIsModalOpen] = useState(false);
+  const [selectedAssignment, setSelectedAssignment] = useState(null);
+  const [solutionText, setSolutionText] = useState('');
+  const [isSaving, setIsSaving] = useState(false);
+  const [modalError, setModalError] = useState('');
+
+  // Load Dashboard Data
+  const loadDashboardData = async () => {
+    try {
+      setIsLoadingPage(true);
+      setErrorMsg('');
+
+      if (!user.group_id) {
+        setGroupName('Biriktirilmagan');
+        setAssignments([]);
+        setIsLoadingPage(false);
+        return;
+      }
+
+      // 1. Fetch group details
+      const { data: groupData, error: groupErr } = await supabase
+        .from('groups')
+        .select('name')
+        .eq('id', user.group_id);
+      if (groupErr) throw groupErr;
+      if (groupData && groupData.length > 0) {
+        setGroupName(groupData[0].name);
+      }
+
+      // 2. Fetch assignments for this group
+      const { data: assGroups, error: assError } = await supabase
+        .from('assignment_groups')
+        .select(`
+          assignment_id,
+          assignments (
+            id,
+            title,
+            description,
+            deadline,
+            created_at,
+            users (
+              full_name
+            )
+          )
+        `)
+        .eq('group_id', user.group_id);
+      if (assError) throw assError;
+
+      // 3. Fetch submissions by this student
+      const { data: subsData, error: subsError } = await supabase
+        .from('submissions')
+        .select('*')
+        .eq('student_id', user.id);
+      if (subsError) throw subsError;
+
+      // 4. Stitch in memory
+      if (assGroups) {
+        const merged = assGroups
+          .filter(ag => ag.assignments !== null)
+          .map(ag => {
+            const assignment = ag.assignments;
+            const submission = (subsData || []).find(s => s.assignment_id === assignment.id);
+            return {
+              ...assignment,
+              submission: submission || null
+            };
+          })
+          .sort((a, b) => new Date(b.created_at) - new Date(a.created_at));
+        setAssignments(merged);
+      }
+
+    } catch (err) {
+      console.error('Error loading student dashboard data:', err);
+      setErrorMsg('Ma\'lumotlarni yuklashda xatolik yuz berdi.');
+    } finally {
+      setIsLoadingPage(false);
+    }
+  };
+
+  useEffect(() => {
+    if (!user.id || user.role !== 'student') {
+      navigate('/');
+      return;
+    }
+    loadDashboardData();
+  }, []);
+
+  // Logout
+  const handleLogout = () => {
+    localStorage.removeItem('unitask_user');
+    navigate('/');
+  };
+
+  // Open submission form
+  const handleOpenSubmit = (assignment) => {
+    setSelectedAssignment(assignment);
+    setSolutionText(assignment.submission?.solution_text || '');
+    setModalError('');
+    setIsModalOpen(true);
+  };
+
+  // Submit solution
+  const handleSubmitSolution = async (e) => {
+    e.preventDefault();
+    if (!solutionText.trim()) {
+      setModalError('Iltimos, topshiriq javobini kiriting.');
+      return;
+    }
+
+    const isOverdue = new Date(selectedAssignment.deadline) < new Date();
+    if (isOverdue) {
+      setModalError('Muddati o\'tgan topshiriqlar uchun javob yuborib bo\'lmaydi.');
+      return;
+    }
+
+    setIsSaving(true);
+    setModalError('');
+
+    try {
+      if (selectedAssignment.submission) {
+        // UPDATE existing submission (e.g. if resubmitting returned assignment)
+        const { error } = await supabase
+          .from('submissions')
+          .update({
+            solution_text: solutionText.trim(),
+            status: 'pending',
+            score: null,
+            teacher_comment: null,
+            submitted_at: new Date().toISOString()
+          })
+          .eq('id', selectedAssignment.submission.id);
+        if (error) throw error;
+      } else {
+        // INSERT new submission
+        const { error } = await supabase
+          .from('submissions')
+          .insert([
+            {
+              assignment_id: selectedAssignment.id,
+              student_id: user.id,
+              solution_text: solutionText.trim(),
+              status: 'pending'
+            }
+          ]);
+        if (error) throw error;
+      }
+
+      setSuccessMsg('Topshiriq muvaffaqiyatli yuborildi!');
+      setIsModalOpen(false);
+      await loadDashboardData();
+      
+      // Auto clear success message after 4s
+      setTimeout(() => {
+        setSuccessMsg('');
+      }, 4000);
+
+    } catch (err) {
+      console.error('Error submitting assignment:', err);
+      setModalError('Topshiriqni yuborishda xatolik: ' + err.message);
+    } finally {
+      setIsSaving(false);
+    }
+  };
+
+  // Date formatter helpers
+  const formatDateTime = (dateString) => {
+    if (!dateString) return '-';
+    const date = new Date(dateString);
+    return date.toLocaleString('uz-UZ', {
+      year: 'numeric',
+      month: 'short',
+      day: 'numeric',
+      hour: '2-digit',
+      minute: '2-digit'
+    });
+  };
+
+  // Status mapping helper
+  const getSubmissionStatus = (assignment) => {
+    const sub = assignment.submission;
+    if (!sub) {
+      const isOverdue = new Date(assignment.deadline) < new Date();
+      if (isOverdue) {
+        return {
+          text: 'Topshirilmagan (Muddati o\'tgan)',
+          badgeClass: 'bg-red-950/20 border-red-900/30 text-red-400',
+          canSubmit: false
+        };
+      }
+      return {
+        text: 'Topshirilmagan',
+        badgeClass: 'bg-slate-900/40 border-slate-800 text-slate-400',
+        canSubmit: true
+      };
+    }
+
+    if (sub.status === 'pending') {
+      return {
+        text: 'Kutilmoqda (Pending)',
+        badgeClass: 'bg-amber-950/20 border-amber-900/30 text-amber-400',
+        canSubmit: true // Can edit/resubmit while pending
+      };
+    }
+
+    if (sub.status === 'graded' || sub.status === 'accepted') {
+      return {
+        text: `Qabul qilindi (Ball: ${sub.score || '-'})`,
+        badgeClass: 'bg-emerald-950/20 border-emerald-900/30 text-emerald-400',
+        canSubmit: false // Graded cannot be changed
+      };
+    }
+
+    if (sub.status === 'returned' || sub.status === 'rejected') {
+      return {
+        text: 'Qaytarildi (Rad etildi)',
+        badgeClass: 'bg-rose-950/20 border-rose-900/30 text-rose-400',
+        canSubmit: true // Returned can be resubmitted
+      };
+    }
+
+    return {
+      text: 'Noma\'lum',
+      badgeClass: 'bg-slate-900 border-slate-800 text-slate-450',
+      canSubmit: false
+    };
+  };
+
+  return (
+    <div className="min-h-screen bg-slate-950 text-slate-100 flex flex-col font-sans selection:bg-emerald-500/30 selection:text-emerald-200">
+      
+      {/* Top Header */}
+      <header className="border-b border-slate-900 bg-slate-900/40 backdrop-blur-xl sticky top-0 z-40 px-6 py-4 flex items-center justify-between">
+        <div className="flex items-center gap-3">
+          <div className="h-10 w-10 rounded-xl bg-gradient-to-tr from-emerald-500 to-teal-650 to-teal-650 flex items-center justify-center shadow-lg shadow-emerald-500/25">
+            <GraduationCap className="h-6 w-6 text-white" />
+          </div>
+          <div>
+            <h1 className="font-bold text-xl bg-clip-text text-transparent bg-gradient-to-r from-emerald-400 to-teal-400">UniTask</h1>
+            <p className="text-xs text-slate-500">Student Workspace</p>
+          </div>
+        </div>
+
+        <div className="flex items-center gap-4">
+          <div className="hidden sm:flex items-center gap-2 px-3 py-1.5 rounded-xl bg-slate-900/60 border border-slate-800 text-slate-350 text-sm font-semibold">
+            <User className="h-4 w-4 text-emerald-400" />
+            <span>{user.full_name}</span>
+            <span className="text-[10px] uppercase font-extrabold px-1.5 py-0.5 rounded-md bg-emerald-950/30 border border-emerald-900/40 text-emerald-400">
+              {groupName}
+            </span>
+          </div>
+          <button 
+            onClick={handleLogout}
+            className="flex items-center gap-2 px-4 py-2 rounded-xl bg-slate-900 hover:bg-slate-800 text-slate-300 hover:text-white transition-all text-sm font-semibold border border-slate-800 hover:border-slate-700"
+          >
+            <LogOut className="h-4 w-4" />
+            Chiqish
+          </button>
+        </div>
+      </header>
+
+      {/* Loading */}
+      {isLoadingPage ? (
+        <div className="flex-1 flex flex-col items-center justify-center gap-3">
+          <Loader2 className="h-8 w-8 text-emerald-500 animate-spin" />
+          <p className="text-slate-400 text-sm font-medium">Topshiriqlar yuklanmoqda...</p>
+        </div>
+      ) : (
+        <main className="flex-1 max-w-5xl w-full mx-auto p-6 md:p-8 space-y-8 animate-fadeIn">
+          
+          {/* Dashboard Header Banner */}
+          <div className="bg-slate-905 bg-slate-900/20 border border-slate-900 rounded-3xl p-6 md:p-8 backdrop-blur-sm">
+            <h2 className="text-2xl md:text-3xl font-extrabold text-white mb-2">
+              Salom, {user.full_name}!
+            </h2>
+            <p className="text-slate-400 text-sm md:text-base font-medium">
+              Guruh: <span className="text-emerald-400 font-extrabold">{groupName}</span>. Bugungi berilgan topshiriqlar ro'yxati bilan tanishing.
+            </p>
+          </div>
+
+          {/* Student Statistics Widgets Grid */}
+          <div className="grid grid-cols-1 sm:grid-cols-3 gap-6">
+            
+            {/* Stat 1: Total Assignments */}
+            <div className="bg-slate-900/30 border border-slate-900 rounded-3xl p-6 flex items-center justify-between transition-all duration-300 hover:border-slate-850">
+              <div className="space-y-1">
+                <span className="text-slate-500 text-xs font-bold uppercase tracking-wider">Jami topshiriqlar</span>
+                <p className="text-3xl font-extrabold text-white">{assignments.length}</p>
+              </div>
+              <div className="h-12 w-12 rounded-2xl bg-emerald-500/10 border border-emerald-500/20 flex items-center justify-center text-emerald-400">
+                <ClipboardList className="h-6 w-6" />
+              </div>
+            </div>
+
+            {/* Stat 2: Successfully Submitted */}
+            <div className="bg-slate-900/30 border border-slate-900 rounded-3xl p-6 flex items-center justify-between transition-all duration-300 hover:border-slate-850">
+              <div className="space-y-1">
+                <span className="text-slate-500 text-xs font-bold uppercase tracking-wider">Muvaffaqiyatli topshirilgan</span>
+                <p className="text-3xl font-extrabold text-white">
+                  {assignments.filter(a => a.submission && (a.submission.status === 'accepted' || a.submission.status === 'graded')).length}
+                </p>
+              </div>
+              <div className="h-12 w-12 rounded-2xl bg-teal-500/10 border border-teal-500/20 flex items-center justify-center text-teal-400">
+                <CheckCircle className="h-6 w-6" />
+              </div>
+            </div>
+
+            {/* Stat 3: Average Score */}
+            <div className="bg-slate-900/30 border border-slate-900 rounded-3xl p-6 flex items-center justify-between transition-all duration-300 hover:border-slate-850">
+              <div className="space-y-1">
+                <span className="text-slate-500 text-xs font-bold uppercase tracking-wider">O'rtacha ball</span>
+                <p className="text-3xl font-extrabold text-emerald-400">
+                  {(() => {
+                    const graded = assignments.filter(a => a.submission && (a.submission.status === 'accepted' || a.submission.status === 'graded') && a.submission.score !== null);
+                    return graded.length > 0
+                      ? Math.round(graded.reduce((acc, c) => acc + c.submission.score, 0) / graded.length) + ' ball'
+                      : '-';
+                  })()}
+                </p>
+              </div>
+              <div className="h-12 w-12 rounded-2xl bg-teal-650/10 bg-emerald-500/10 border border-emerald-500/20 flex items-center justify-center text-emerald-400">
+                <GraduationCap className="h-6 w-6" />
+              </div>
+            </div>
+
+          </div>
+
+          {/* Success messages */}
+          {successMsg && (
+            <div className="p-4 rounded-2xl bg-emerald-950/30 border border-emerald-900/50 text-emerald-200 text-sm animate-fadeIn">
+              <p className="font-semibold">{successMsg}</p>
+            </div>
+          )}
+
+          {/* Error messages */}
+          {errorMsg && (
+            <div className="p-4 rounded-2xl bg-red-950/30 border border-red-900/50 text-red-200 text-sm">
+              <p className="font-semibold">{errorMsg}</p>
+            </div>
+          )}
+
+          {/* Assignments Block */}
+          <div className="space-y-6">
+            <div className="flex items-center gap-3">
+              <div className="h-8 w-8 rounded-lg bg-emerald-500/10 border border-emerald-500/20 flex items-center justify-center text-emerald-400">
+                <FileText className="h-4.5 w-4.5" />
+              </div>
+              <h3 className="text-xl font-bold text-white">Sizga Biriktirilgan Vazifalar</h3>
+            </div>
+
+            {assignments.length === 0 ? (
+              /* Empty state */
+              <div className="border border-dashed border-slate-800/80 rounded-3xl p-16 text-center flex flex-col items-center justify-center gap-4">
+                <div className="h-16 w-16 rounded-2xl bg-slate-900 border border-slate-850 flex items-center justify-center text-slate-600">
+                  <BookOpen className="h-8 w-8" />
+                </div>
+                <div>
+                  <h4 className="text-lg font-bold text-slate-300 mb-1">Vazifalar topilmadi</h4>
+                  <p className="text-slate-500 text-sm max-w-xs font-medium">
+                    Hozircha sizning guruhingizga hech qanday topshiriq biriktirilmagan.
+                  </p>
+                </div>
+              </div>
+            ) : (
+              /* Assignments Grid */
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+                {assignments.map((assignment) => {
+                  const statusInfo = getSubmissionStatus(assignment);
+                  const isOverdue = new Date(assignment.deadline) < new Date();
+                  
+                  return (
+                    <div 
+                      key={assignment.id} 
+                      className="bg-slate-900/30 border border-slate-900 hover:border-slate-850 rounded-3xl p-6 flex flex-col justify-between transition-all duration-300 hover:shadow-xl hover:shadow-black/30 group"
+                    >
+                      <div className="space-y-4">
+                        {/* Header details */}
+                        <div className="flex items-start justify-between gap-2 flex-wrap">
+                          <span className={`px-2.5 py-1 rounded-lg text-xs font-bold border tracking-wide ${statusInfo.badgeClass}`}>
+                            {statusInfo.text}
+                          </span>
+                          <span className="text-slate-500 text-[11px] font-semibold flex items-center gap-1">
+                            <Clock className="h-3 w-3" />
+                            {formatDateTime(assignment.created_at)}
+                          </span>
+                        </div>
+
+                        {/* Title & Desc */}
+                        <div>
+                          <h4 className="font-extrabold text-lg text-white group-hover:text-emerald-400 transition-colors line-clamp-1">
+                            {assignment.title}
+                          </h4>
+                          <p className="text-slate-400 text-sm line-clamp-3 mt-2 leading-relaxed font-medium">
+                            {assignment.description}
+                          </p>
+                        </div>
+                      </div>
+
+                      {/* Returned Comment Box */}
+                      {assignment.submission?.status === 'returned' && assignment.submission?.teacher_comment && (
+                        <div className="mt-4 p-3 rounded-xl bg-rose-950/20 border border-rose-900/30 text-rose-350 text-xs font-medium leading-relaxed">
+                          <strong>O'qituvchi izohi:</strong> "{assignment.submission.teacher_comment}"
+                        </div>
+                      )}
+
+                      {/* Footer Details */}
+                      <div className="border-t border-slate-900/60 pt-4 mt-5 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
+                        <div className="space-y-1.5 text-xs text-slate-500 font-semibold">
+                          <div className="flex items-center gap-1.5">
+                            <User className="h-3.5 w-3.5 text-slate-600" />
+                            <span>Ustoz:</span>
+                            <span className="text-slate-350 font-bold">{assignment.users?.full_name || 'Noma\'lum'}</span>
+                          </div>
+                          <div className="flex items-center gap-1.5">
+                            <Calendar className="h-3.5 w-3.5 text-slate-650" />
+                            <span>Deadline:</span>
+                            <span className="text-slate-350 font-bold">{formatDateTime(assignment.deadline)}</span>
+                          </div>
+                        </div>
+
+                        {/* Submit Button */}
+                        {statusInfo.canSubmit && (
+                          <button
+                            onClick={() => handleOpenSubmit(assignment)}
+                            className="flex items-center justify-center gap-1.5 px-4.5 py-2.5 rounded-xl bg-gradient-to-r from-emerald-500 to-teal-600 text-white font-bold text-xs shadow-lg shadow-emerald-500/10 hover:shadow-emerald-500/20 hover:scale-[1.01] active:scale-[0.99] transition-all self-end sm:self-auto cursor-pointer"
+                          >
+                            <Send className="h-3.5 w-3.5" />
+                            {assignment.submission ? 'Qayta topshirish' : 'Topshirish'}
+                          </button>
+                        )}
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            )}
+          </div>
+
+          {/* Submission Modal */}
+          {isModalOpen && selectedAssignment && (
+            <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
+              {/* Overlay */}
+              <div 
+                className="absolute inset-0 bg-slate-950/80 backdrop-blur-sm transition-opacity"
+                onClick={() => !isSaving && setIsModalOpen(false)}
+              ></div>
+
+              {/* Modal Container */}
+              <div className="bg-slate-900 border border-slate-800 rounded-3xl w-full max-w-lg p-6 md:p-8 relative z-10 shadow-2xl animate-modalIn flex flex-col max-h-[90vh]">
+                
+                {/* Header */}
+                <div className="flex items-center justify-between pb-4 border-b border-slate-800">
+                  <div>
+                    <h3 className="text-lg font-extrabold text-white line-clamp-1">
+                      {selectedAssignment.title}
+                    </h3>
+                    <p className="text-xs text-slate-500 font-semibold mt-0.5">
+                      Ustoz: {selectedAssignment.users?.full_name} | Deadline: {formatDateTime(selectedAssignment.deadline)}
+                    </p>
+                  </div>
+                  <button 
+                    onClick={() => !isSaving && setIsModalOpen(false)}
+                    disabled={isSaving}
+                    className="p-1 rounded-lg text-slate-500 hover:text-white hover:bg-slate-800 transition-colors disabled:opacity-50"
+                  >
+                    <X className="h-5 w-5" />
+                  </button>
+                </div>
+
+                {/* Form Content */}
+                <form onSubmit={handleSubmitSolution} className="flex-1 overflow-y-auto pr-1 py-4 space-y-5">
+                  {/* Task specifications preview */}
+                  <div className="bg-slate-950/60 border border-slate-850 p-4 rounded-2xl text-slate-400 text-xs leading-relaxed font-medium">
+                    <strong className="text-slate-300 block mb-1">Vazifa talabi:</strong>
+                    {selectedAssignment.description}
+                  </div>
+
+                  {/* Errors */}
+                  {modalError && (
+                    <div className="flex items-center gap-3 p-4 rounded-xl bg-red-950/30 border border-red-900/50 text-red-200 text-sm font-semibold">
+                      <AlertCircle className="h-5 w-5 shrink-0 text-red-400" />
+                      <p>{modalError}</p>
+                    </div>
+                  )}
+
+                  {/* Input area */}
+                  <div>
+                    <label className="block text-slate-350 text-sm font-semibold mb-2 ml-1" htmlFor="solution-input">
+                      Sizning javobingiz *
+                    </label>
+                    <textarea
+                      id="solution-input"
+                      rows="6"
+                      placeholder="Ushbu yerga kodingizni, GitHub linkini yoki batafsil javobingizni yozing..."
+                      value={solutionText}
+                      onChange={(e) => setSolutionText(e.target.value)}
+                      disabled={isSaving || (new Date(selectedAssignment.deadline) < new Date())}
+                      required
+                      className="w-full bg-slate-950/60 border border-slate-800 text-white rounded-2xl py-3.5 px-4 text-sm outline-none placeholder:text-slate-600 focus:border-emerald-500 focus:ring-2 focus:ring-emerald-500/20 transition-all font-medium resize-none"
+                    ></textarea>
+                  </div>
+
+                  {/* Deadline control message */}
+                  {new Date(selectedAssignment.deadline) < new Date() && (
+                    <div className="flex items-center gap-2 p-3 rounded-xl bg-rose-950/20 border border-rose-900/30 text-rose-400 text-xs font-bold">
+                      <AlertCircle className="h-4.5 w-4.5" />
+                      <span>Topshiriq muddati o'tgan! Qayta yuborish imkoni mavjud emas.</span>
+                    </div>
+                  )}
+
+                  {/* Action Buttons */}
+                  <div className="border-t border-slate-800 pt-5 flex items-center justify-end gap-3">
+                    <button
+                      type="button"
+                      onClick={() => setIsModalOpen(false)}
+                      disabled={isSaving}
+                      className="px-5 py-2.5 rounded-xl bg-slate-800 hover:bg-slate-750 text-slate-300 hover:text-white font-bold text-sm transition-all border border-slate-750"
+                    >
+                      Bekor qilish
+                    </button>
+                    {!(new Date(selectedAssignment.deadline) < new Date()) && (
+                      <button
+                        type="submit"
+                        disabled={isSaving}
+                        className="px-5 py-2.5 rounded-xl bg-gradient-to-r from-emerald-500 to-teal-650 text-white font-bold text-sm shadow-lg shadow-emerald-500/10 hover:shadow-emerald-500/25 transition-all hover:scale-[1.01] active:scale-[0.99] disabled:opacity-75 disabled:cursor-not-allowed"
+                      >
+                        {isSaving ? (
+                          <span className="flex items-center justify-center gap-2">
+                            <Loader2 className="h-4 w-4 animate-spin" />
+                            Yuborilmoqda...
+                          </span>
+                        ) : (
+                          'Vazifani topshirish'
+                        )}
+                      </button>
+                    )}
+                  </div>
+                </form>
+
+              </div>
+            </div>
+          )}
+
+        </main>
+      )}
+
+    </div>
+  );
+}
