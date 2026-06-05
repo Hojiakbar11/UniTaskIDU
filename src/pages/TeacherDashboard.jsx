@@ -1,15 +1,27 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { supabase } from '../lib/supabase';
 import { 
   LogOut, GraduationCap, Plus, Users, Calendar, 
   FileText, CheckCircle, Clock, AlertCircle, Loader2, X, BookOpen, User,
-  Check, ArrowRight, CornerDownRight, MessageSquare, ExternalLink
+  Check, ArrowRight, CornerDownRight, MessageSquare, ExternalLink, Bell,
+  ChevronLeft, ChevronRight, DollarSign, ArrowUpDown, ArrowUp, ArrowDown,
+  Search, Paperclip
 } from 'lucide-react';
 
 export default function TeacherDashboard() {
   const navigate = useNavigate();
   const user = JSON.parse(localStorage.getItem('unitask_user') || '{}');
+
+  // Sidebar Collapse state
+  const [isSidebarCollapsed, setIsSidebarCollapsed] = useState(() => localStorage.getItem('unitask_sidebar_collapsed') === 'true');
+  const toggleSidebar = () => {
+    setIsSidebarCollapsed(prev => {
+      const next = !prev;
+      localStorage.setItem('unitask_sidebar_collapsed', String(next));
+      return next;
+    });
+  };
 
   // Page Data States
   const [groups, setGroups] = useState([]);
@@ -63,6 +75,7 @@ export default function TeacherDashboard() {
   const [gradebookSubmissions, setGradebookSubmissions] = useState([]);
   const [isLoadingGradebook, setIsLoadingGradebook] = useState(false);
   const [gradebookError, setGradebookError] = useState('');
+  const [contractsList, setContractsList] = useState([]);
 
   // Interactive Gradebook scores (HEMIS)
   const [oraliq1Scores, setOraliq1Scores] = useState(() => {
@@ -97,12 +110,234 @@ export default function TeacherDashboard() {
   const [isLoadingTimetable, setIsLoadingTimetable] = useState(false);
   const [timetableError, setTimetableError] = useState('');
 
+  // Search query states
+  const [assignmentsSearchQuery, setAssignmentsSearchQuery] = useState('');
+  const [gradebookSearchQuery, setGradebookSearchQuery] = useState('');
+  const [attendanceSearchQuery, setAttendanceSearchQuery] = useState('');
+  const [selectedFile, setSelectedFile] = useState(null);
+
+  // Sorting Config States
+  const [gradebookSortConfig, setGradebookSortConfig] = useState({ key: null, direction: 'asc' });
+  const [attendanceSortConfig, setAttendanceSortConfig] = useState({ key: null, direction: 'asc' });
+
+  // Sort helpers
+  const handleGradebookSort = (key) => {
+    let direction = 'asc';
+    if (gradebookSortConfig.key === key && gradebookSortConfig.direction === 'asc') {
+      direction = 'desc';
+    }
+    setGradebookSortConfig({ key, direction });
+  };
+
+  const handleAttendanceSort = (key) => {
+    let direction = 'asc';
+    if (attendanceSortConfig.key === key && attendanceSortConfig.direction === 'asc') {
+      direction = 'desc';
+    }
+    setAttendanceSortConfig({ key, direction });
+  };
+
+  // Gradebook helper to compute student stats for sorting
+  const getGradebookStudentStats = React.useCallback((student) => {
+    const getExamScore = (title) => {
+      const ass = gradebookAssignments.find(a => a.title === title);
+      if (!ass) return 0;
+      const sub = gradebookSubmissions.find(s => s.assignment_id === ass.id && s.student_id === student.id);
+      return (sub && typeof sub.score === 'number') ? sub.score : 0;
+    };
+
+    const joriyAssignments = gradebookAssignments.filter(a => a.title !== '1-Oraliq' && a.title !== '2-Oraliq' && a.title !== 'Yakuniy');
+    const rawJoriy = joriyAssignments.reduce((acc, a) => {
+      const sub = gradebookSubmissions.find(s => s.assignment_id === a.id && s.student_id === student.id);
+      return acc + ((sub && typeof sub.score === 'number') ? sub.score : 0);
+    }, 0);
+    const joriy = Math.min(rawJoriy, 30);
+
+    const oraliq1 = getExamScore('1-Oraliq');
+    const oraliq2 = getExamScore('2-Oraliq');
+    const yakuniy = getExamScore('Yakuniy');
+
+    const jami = joriy + oraliq1 + oraliq2;
+
+    const contract = contractsList.find(c => c.student_id === student.id);
+    const baseAmount = contract ? (contract.base_amount ?? 16000000) : 16000000;
+    const discountAmount = contract ? (contract.discount_amount ?? 0) : 0;
+    const paidAmount = contract ? (contract.paid_amount ?? 0) : 0;
+    const debt = Math.max(0, baseAmount - discountAmount - paidAmount);
+
+    const isAllowed = jami >= 36 && debt <= 0;
+    const totalBall = jami + (isAllowed ? yakuniy : 0);
+
+    return {
+      full_name: student.full_name || '',
+      Amaliyot: joriy,
+      '1-Oraliq': oraliq1,
+      '2-Oraliq': oraliq2,
+      Jami: jami,
+      Yakuniy: yakuniy,
+      totalBall: totalBall
+    };
+  }, [gradebookAssignments, gradebookSubmissions, contractsList]);
+
+  const sortedGradebookStudents = React.useMemo(() => {
+    let result = [...gradebookStudents];
+    if (gradebookSearchQuery) {
+      const q = gradebookSearchQuery.toLowerCase();
+      result = result.filter(s => (s.full_name || '').toLowerCase().includes(q));
+    }
+    if (gradebookSortConfig.key !== null) {
+      result.sort((a, b) => {
+        const aStats = getGradebookStudentStats(a);
+        const bStats = getGradebookStudentStats(b);
+        const aVal = aStats[gradebookSortConfig.key];
+        const bVal = bStats[gradebookSortConfig.key];
+        if (typeof aVal === 'string') {
+          const comp = aVal.toLowerCase().localeCompare(bVal.toLowerCase());
+          return gradebookSortConfig.direction === 'asc' ? comp : -comp;
+        } else {
+          if (aVal < bVal) return gradebookSortConfig.direction === 'asc' ? -1 : 1;
+          if (aVal > bVal) return gradebookSortConfig.direction === 'asc' ? 1 : -1;
+          return 0;
+        }
+      });
+    }
+    return result;
+  }, [gradebookStudents, gradebookSortConfig, gradebookSearchQuery, getGradebookStudentStats]);
+
+  // Attendance helper to compute student stats for sorting
+  const getAttendanceStudentStats = React.useCallback((student) => {
+    const record = attendanceRecords[student.id] || { status: 'absent' };
+    return {
+      full_name: student.full_name || '',
+      status: record.status || 'absent'
+    };
+  }, [attendanceRecords]);
+
+  const sortedAttendanceStudents = React.useMemo(() => {
+    let result = [...students];
+    if (attendanceSearchQuery) {
+      const q = attendanceSearchQuery.toLowerCase();
+      result = result.filter(s => (s.full_name || '').toLowerCase().includes(q));
+    }
+    if (attendanceSortConfig.key !== null) {
+      result.sort((a, b) => {
+        const aStats = getAttendanceStudentStats(a);
+        const bStats = getAttendanceStudentStats(b);
+        const aVal = aStats[attendanceSortConfig.key];
+        const bVal = bStats[attendanceSortConfig.key];
+        if (typeof aVal === 'string') {
+          const comp = aVal.toLowerCase().localeCompare(bVal.toLowerCase());
+          return attendanceSortConfig.direction === 'asc' ? comp : -comp;
+        } else {
+          if (aVal < bVal) return attendanceSortConfig.direction === 'asc' ? -1 : 1;
+          if (aVal > bVal) return attendanceSortConfig.direction === 'asc' ? 1 : -1;
+          return 0;
+        }
+      });
+    }
+    return result;
+  }, [students, attendanceSortConfig, attendanceSearchQuery, getAttendanceStudentStats]);
+
+  const filteredAssignments = React.useMemo(() => {
+    let result = [...assignments];
+    if (assignmentsSearchQuery) {
+      const q = assignmentsSearchQuery.toLowerCase();
+      result = result.filter(a => 
+        (a.title || '').toLowerCase().includes(q) || 
+        (a.description || '').toLowerCase().includes(q)
+      );
+    }
+    return result;
+  }, [assignments, assignmentsSearchQuery]);
+
+  // Notifications states
+  const [notifications, setNotifications] = useState([]);
+  const [unreadCount, setUnreadCount] = useState(0);
+  const [isNotifOpen, setIsNotifOpen] = useState(false);
+
+  // Review Modal States (Baholash)
+  const [isReviewModalOpen, setIsReviewModalOpen] = useState(false);
+  const [selectedSubmission, setSelectedSubmission] = useState(null);
+  const [reviewScore, setReviewScore] = useState('');
+  const [reviewComment, setReviewComment] = useState('');
+  const [isReviewSaving, setIsReviewSaving] = useState(false);
+  const [reviewError, setReviewError] = useState('');
+
+  const notifRef = useRef(null);
+  const assignmentModalRef = useRef(null);
+  const reviewModalRef = useRef(null);
+
+  useEffect(() => {
+    const handleClickOutside = (event) => {
+      if (isNotifOpen && notifRef.current && !notifRef.current.contains(event.target)) {
+        setIsNotifOpen(false);
+      }
+      if (isModalOpen && assignmentModalRef.current && !assignmentModalRef.current.contains(event.target)) {
+        setIsModalOpen(false);
+      }
+      if (isReviewModalOpen && reviewModalRef.current && !reviewModalRef.current.contains(event.target)) {
+        setIsReviewModalOpen(false);
+      }
+    };
+
+    const handleKeyDown = (event) => {
+      if (event.key === 'Escape') {
+        setIsNotifOpen(false);
+        setIsModalOpen(false);
+        setIsReviewModalOpen(false);
+      }
+    };
+
+    document.addEventListener('mousedown', handleClickOutside);
+    document.addEventListener('keydown', handleKeyDown);
+    return () => {
+      document.removeEventListener('mousedown', handleClickOutside);
+      document.removeEventListener('keydown', handleKeyDown);
+    };
+  }, [isNotifOpen, isModalOpen, isReviewModalOpen]);
+
+  const loadNotifications = async () => {
+    if (!user || !user.id) return;
+    try {
+      const { data, error } = await supabase
+        .from('notifications')
+        .select('*')
+        .eq('user_id', user.id)
+        .order('created_at', { ascending: false });
+      if (error) throw error;
+      setNotifications(data || []);
+      setUnreadCount((data || []).filter(n => !n.is_read).length);
+    } catch (err) {
+      console.error('Error fetching notifications:', err);
+    }
+  };
+
+  const handleBellClick = async () => {
+    setIsNotifOpen(!isNotifOpen);
+    if (!isNotifOpen && unreadCount > 0) {
+      try {
+        const { error } = await supabase
+          .from('notifications')
+          .update({ is_read: true })
+          .eq('user_id', user.id)
+          .eq('is_read', false);
+        if (error) throw error;
+        setNotifications(prev => prev.map(n => ({ ...n, is_read: true })));
+        setUnreadCount(0);
+      } catch (err) {
+        console.error('Error marking notifications as read:', err);
+      }
+    }
+  };
+
   // Real-Time Time Tracking
   const [currentTimeState, setCurrentTimeState] = useState(new Date());
 
   useEffect(() => {
+    loadNotifications();
     const timer = setInterval(() => {
       setCurrentTimeState(new Date());
+      loadNotifications();
     }, 15000);
     return () => clearInterval(timer);
   }, []);
@@ -132,61 +367,76 @@ export default function TeacherDashboard() {
     return nowTimeStr >= startNorm && nowTimeStr <= endNorm;
   };
 
-  useEffect(() => {
-    localStorage.setItem('unitask_oraliq1_scores', JSON.stringify(oraliq1Scores));
-  }, [oraliq1Scores]);
-
-  useEffect(() => {
-    localStorage.setItem('unitask_oraliq2_scores', JSON.stringify(oraliq2Scores));
-  }, [oraliq2Scores]);
-
-  useEffect(() => {
-    localStorage.setItem('unitask_yakuniy_scores', JSON.stringify(yakuniyScores));
-  }, [yakuniyScores]);
-
-  const handleOraliq1Change = (studentId, value) => {
-    let score = value;
-    if (value !== '') {
-      const num = parseFloat(value);
-      if (!isNaN(num)) {
-        if (num > 15) score = '15';
-        if (num < 0) score = '0';
-      }
+  const handleSaveGrade = async (studentId, examTitle, val) => {
+    let scoreNum = parseFloat(val);
+    if (isNaN(scoreNum) || val === '') {
+      scoreNum = 0;
     }
-    setOraliq1Scores(prev => ({
-      ...prev,
-      [studentId]: score
-    }));
-  };
 
-  const handleOraliq2Change = (studentId, value) => {
-    let score = value;
-    if (value !== '') {
-      const num = parseFloat(value);
-      if (!isNaN(num)) {
-        if (num > 15) score = '15';
-        if (num < 0) score = '0';
-      }
+    // Validation limits
+    if (examTitle === '1-Oraliq' || examTitle === '2-Oraliq') {
+      if (scoreNum < 0 || scoreNum > 15) scoreNum = Math.max(0, Math.min(15, scoreNum));
+    } else if (examTitle === 'Yakuniy') {
+      if (scoreNum < 0 || scoreNum > 40) scoreNum = Math.max(0, Math.min(40, scoreNum));
     }
-    setOraliq2Scores(prev => ({
-      ...prev,
-      [studentId]: score
-    }));
-  };
 
-  const handleYakuniyChange = (studentId, value) => {
-    let score = value;
-    if (value !== '') {
-      const num = parseFloat(value);
-      if (!isNaN(num)) {
-        if (num > 40) score = '40';
-        if (num < 0) score = '0';
-      }
+    // Optimistically update local state immediately so typing is lag-free
+    const assignment = gradebookAssignments.find(a => a.title === examTitle);
+    if (!assignment) return;
+
+    const existingSub = gradebookSubmissions.find(s => s.assignment_id === assignment.id && s.student_id === studentId);
+    
+    if (existingSub) {
+      setGradebookSubmissions(prev => prev.map(s => s.id === existingSub.id ? { ...s, score: scoreNum } : s));
+    } else {
+      // Create a temporary local submission to show the value immediately
+      const tempId = `temp-${Date.now()}`;
+      setGradebookSubmissions(prev => [...prev, {
+        id: tempId,
+        assignment_id: assignment.id,
+        student_id: studentId,
+        score: scoreNum,
+        status: 'accepted'
+      }]);
     }
-    setYakuniyScores(prev => ({
-      ...prev,
-      [studentId]: score
-    }));
+
+    // Perform database operations in background using atomic upsert
+    try {
+      const { data: newSub, error } = await supabase
+        .from('submissions')
+        .upsert({
+          assignment_id: assignment.id,
+          student_id: studentId,
+          score: scoreNum,
+          status: 'accepted',
+          solution_text: 'Ustoz tomonidan baholandi',
+          teacher_comment: 'Ustoz kiritdi',
+          submitted_at: new Date().toISOString()
+        }, { onConflict: 'assignment_id,student_id' })
+        .select();
+        
+      if (error) throw error;
+      if (newSub && newSub.length > 0) {
+        setGradebookSubmissions(prev => {
+          const filtered = prev.filter(s => !(s.assignment_id === assignment.id && s.student_id === studentId));
+          return [...filtered, newSub[0]];
+        });
+
+        // Insert notification for student
+        const selectedRelation = teacherRelations.find(rel => rel.id === gradebookRelationId);
+        const subjectName = selectedRelation?.subjects?.name || 'Fan';
+        await supabase
+          .from('notifications')
+          .insert({
+            user_id: studentId,
+            title: `Yangi baho: ${subjectName}`,
+            message: `${examTitle} nazorati uchun bahongiz: ${scoreNum} ball`,
+            is_read: false
+          });
+      }
+    } catch (err) {
+      console.error('Error saving grade:', err);
+    }
   };
 
   // Fetch group students and loaded attendance records
@@ -305,33 +555,27 @@ export default function TeacherDashboard() {
 
       if (studentsError) throw studentsError;
 
-      // 3. Fetch assignments for this subject_id and lesson_type_id = 'Amaliyot'
-      const { data: amaliyotType } = await supabase
-        .from('lesson_types')
-        .select('id')
-        .eq('name', 'Amaliyot')
-        .maybeSingle();
-
-      const amaliyotTypeId = amaliyotType?.id;
-
-      let assignmentsQuery = supabase
+      // 3. Fetch all assignments for this subject_id
+      const { data: assignmentsData, error: assignmentsError } = await supabase
         .from('assignments')
-        .select('id, title')
-        .eq('subject_id', subjectId);
-
-      if (amaliyotTypeId) {
-        assignmentsQuery = assignmentsQuery.eq('lesson_type_id', amaliyotTypeId);
-      } else {
-        assignmentsQuery = assignmentsQuery.eq('lesson_type_id', lessonTypeId);
-      }
-
-      const { data: assignmentsData, error: assignmentsError } = await assignmentsQuery
+        .select(`
+          id,
+          title,
+          lesson_type_id,
+          lesson_types (
+            id,
+            name
+          )
+        `)
+        .eq('subject_id', subjectId)
         .order('created_at', { ascending: true });
 
       if (assignmentsError) throw assignmentsError;
 
+      let currentAssignments = assignmentsData || [];
+
       // 4. Fetch submissions for these assignments
-      const loadedAssignments = assignmentsData || [];
+      const loadedAssignments = currentAssignments;
       const assignmentIds = loadedAssignments.map(a => a.id);
       
       let submissionsData = [];
@@ -345,9 +589,17 @@ export default function TeacherDashboard() {
         submissionsData = subsData || [];
       }
 
+      // 5. Fetch contracts
+      const { data: contractsData, error: conError } = await supabase
+        .from('contracts')
+        .select('*');
+
+      if (conError) throw conError;
+
       setGradebookStudents(studentsData || []);
       setGradebookAssignments(loadedAssignments);
       setGradebookSubmissions(submissionsData);
+      setContractsList(contractsData || []);
 
     } catch (err) {
       console.error('Error loading gradebook data:', err);
@@ -463,14 +715,6 @@ export default function TeacherDashboard() {
     });
   }
   filteredGroupsForAssignment.sort((a, b) => a.name.localeCompare(b.name));
-
-  // Review Modal States (Baholash)
-  const [isReviewModalOpen, setIsReviewModalOpen] = useState(false);
-  const [selectedSubmission, setSelectedSubmission] = useState(null);
-  const [reviewScore, setReviewScore] = useState('');
-  const [reviewComment, setReviewComment] = useState('');
-  const [isReviewSaving, setIsReviewSaving] = useState(false);
-  const [reviewError, setReviewError] = useState('');
 
   // Fetch all initial data
   const loadDashboardData = async () => {
@@ -633,6 +877,25 @@ export default function TeacherDashboard() {
     setSuccessMsg('');
 
     try {
+      let fileUrl = null;
+      if (selectedFile) {
+        const fileExt = selectedFile.name.split('.').pop();
+        const fileName = `${Date.now()}_${Math.random().toString(36).substr(2, 9)}.${fileExt}`;
+        const filePath = `${fileName}`;
+
+        const { error: uploadError } = await supabase.storage
+          .from('assignments')
+          .upload(filePath, selectedFile);
+
+        if (uploadError) throw uploadError;
+
+        const { data: { publicUrl } } = supabase.storage
+          .from('assignments')
+          .getPublicUrl(filePath);
+
+        fileUrl = publicUrl;
+      }
+
       // 1. Insert into assignments table
       const { data: newAssignment, error: assignmentError } = await supabase
         .from('assignments')
@@ -643,7 +906,8 @@ export default function TeacherDashboard() {
             deadline: new Date(assignmentDeadline).toISOString(),
             teacher_id: user.id,
             subject_id: selectedSubject,
-            lesson_type_id: selectedLessonType
+            lesson_type_id: selectedLessonType,
+            file_url: fileUrl
           }
         ])
         .select();
@@ -676,6 +940,7 @@ export default function TeacherDashboard() {
       setSelectedSubject('');
       setSelectedLessonType('');
       setSelectedGroups([]);
+      setSelectedFile(null);
       setIsModalOpen(false);
 
       // Reload Data
@@ -742,6 +1007,24 @@ export default function TeacherDashboard() {
         .eq('id', selectedSubmission.id);
 
       if (error) throw error;
+
+      // Create notification for the student
+      try {
+        const assignmentTitle = selectedSubmission.assignments?.title || 'topshiriq';
+        const displayScore = scoreVal !== null ? scoreVal : 0;
+        await supabase
+          .from('notifications')
+          .insert([
+            {
+              user_id: selectedSubmission.student_id,
+              title: 'Yangi baho qo\'yildi',
+              message: `Sizning ${assignmentTitle} topshirig'ingizga ${displayScore} ball qo'yildi.`,
+              is_read: false
+            }
+          ]);
+      } catch (notifErr) {
+        console.error('Error creating notification:', notifErr);
+      }
 
       setIsReviewModalOpen(false);
       setSelectedSubmission(null);
@@ -843,113 +1126,344 @@ export default function TeacherDashboard() {
     );
   };
 
+  // CSV Export for Gradebook Table
+  const exportToCSV = () => {
+    if (!gradebookStudents || gradebookStudents.length === 0) return;
+
+    // 1. Prepare CSV headers
+    const headers = [
+      "Talaba F.I.Sh.",
+      "Joriy nazorat",
+      "1-Oraliq",
+      "2-Oraliq",
+      "Jami",
+      "Sessiya holati",
+      "Yakuniy nazorat",
+      "Umumiy ball"
+    ];
+
+    // 2. Prepare CSV rows
+    const rows = gradebookStudents.map(student => {
+      // Find exam scores
+      const getExamScore = (title) => {
+        const ass = gradebookAssignments.find(a => a.title === title);
+        if (!ass) return '';
+        const sub = gradebookSubmissions.find(s => s.assignment_id === ass.id && s.student_id === student.id);
+        return (sub && typeof sub.score === 'number') ? sub.score.toString() : '';
+      };
+
+      // Joriy nazorat (Amaliyot yoki Laboratoriya) - SUM of assignment scores (raw)
+      const joriySubmissions = gradebookAssignments
+        .filter(assignment => {
+          const typeName = assignment.lesson_types?.name;
+          return (typeName === 'Amaliyot' || typeName === 'Laboratoriya') && assignment.title !== '1-Oraliq' && assignment.title !== '2-Oraliq' && assignment.title !== 'Yakuniy';
+        })
+        .map(assignment => {
+          const sub = gradebookSubmissions.find(s => s.assignment_id === assignment.id && s.student_id === student.id);
+          return (sub && typeof sub.score === 'number') ? sub.score : 0;
+        });
+      const rawJoriy = joriySubmissions.reduce((a, b) => a + b, 0);
+      const joriy = Math.min(rawJoriy, 30);
+
+      // Ma'ruza online assignments sum for this student
+      const lectureSubmissions = gradebookAssignments
+        .filter(assignment => assignment.lesson_types?.name === 'Ma\'ruza' && assignment.title !== '1-Oraliq' && assignment.title !== '2-Oraliq' && assignment.title !== 'Yakuniy')
+        .map(assignment => {
+          const sub = gradebookSubmissions.find(s => s.assignment_id === assignment.id && s.student_id === student.id);
+          return (sub && typeof sub.score === 'number') ? sub.score : 0;
+        });
+      const onlineMaruzaSum = lectureSubmissions.reduce((a, b) => a + b, 0);
+
+      // Oraliq 1 - Max 15 (Combined online Ma'ruza sum + database grade)
+      const oraliq1ScoreStr = getExamScore('1-Oraliq');
+      const oraliq1ManualVal = oraliq1ScoreStr === '' ? 0 : (parseFloat(oraliq1ScoreStr) || 0);
+      const oraliq1Val = onlineMaruzaSum > 0 ? Math.min(onlineMaruzaSum, 15) : Math.min(oraliq1ManualVal, 15);
+
+      // Oraliq 2 - Max 15
+      const oraliq2ScoreStr = getExamScore('2-Oraliq');
+      const oraliq2ManualVal = oraliq2ScoreStr === '' ? 0 : (parseFloat(oraliq2ScoreStr) || 0);
+      const oraliq2Val = Math.min(oraliq2ManualVal, 15);
+
+      // Jami to'plangan ball (Max 60)
+      const jami = Math.min(joriy + oraliq1Val + oraliq2Val, 60);
+
+      // Find student's contract
+      const contract = contractsList.find(c => c.student_id === student.id);
+      const baseAmount = contract ? (contract.base_amount ?? 16000000) : 16000000;
+      const discountAmount = contract ? (contract.discount_amount ?? 0) : 0;
+      const paidAmount = contract ? (contract.paid_amount ?? 0) : 0;
+      const debt = Math.max(0, baseAmount - discountAmount - paidAmount);
+
+      // Sessiya holati (Status): Allowed if Jami >= 36 and no debt
+      const isAllowed = jami >= 36 && debt <= 0;
+
+      // Yakuniy nazorat (Sessiya) - Max 40
+      const yakuniyScoreStr = getExamScore('Yakuniy');
+      const yakuniyVal = isAllowed && yakuniyScoreStr !== '' ? (parseFloat(yakuniyScoreStr) || 0) : 0;
+
+      // Umumiy ball (Max 100)
+      const umumiy = jami + (isAllowed ? yakuniyVal : 0);
+
+      const sessiyaStatus = debt > 0 
+        ? "Kiritilmadi (Qarz)" 
+        : jami < 36 
+          ? "Kiritilmadi (Past ball)" 
+          : "Ruxsat berilgan";
+
+      return [
+        `"${student.full_name.replace(/"/g, '""')}"`,
+        `"${joriy} ball"`,
+        `"${oraliq1Val} ball"`,
+        `"${oraliq2Val} ball"`,
+        `"${jami} ball"`,
+        `"${sessiyaStatus}"`,
+        `"${isAllowed ? (yakuniyScoreStr || '0') : '0'} ball"`,
+        `"${umumiy} ball"`
+      ];
+    });
+
+    // 3. Build CSV content with UTF-8 BOM
+    const csvContent = "\uFEFF" + [headers.join(";"), ...rows.map(e => e.join(";"))].join("\n");
+
+    // 4. Download file
+    const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement("a");
+    link.setAttribute("href", url);
+    link.setAttribute("download", `gradebook_report.csv`);
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+  };
+
   // Submissions Separation
   const pendingSubmissions = submissions.filter(s => s.status === 'pending');
   const checkedSubmissions = submissions.filter(s => s.status === 'accepted' || s.status === 'rejected' || s.status === 'graded' || s.status === 'returned');
 
+  const selectedRelation = teacherRelations.find(rel => rel.id === gradebookRelationId);
+  const isLectureSelected = selectedRelation?.lesson_types?.name === 'Ma\'ruza';
+
   return (
-    <div className="min-h-screen bg-slate-950 text-slate-100 flex flex-col font-sans selection:bg-indigo-500/30 selection:text-indigo-200">
+    <div className="min-h-screen bg-slate-950 text-slate-100 flex font-sans selection:bg-indigo-500/30 selection:text-indigo-200">
       
-      {/* Top Header */}
-      <header className="border-b border-slate-900 bg-slate-900/40 backdrop-blur-xl sticky top-0 z-40 px-6 py-4 flex items-center justify-between">
-        <div className="flex items-center gap-3">
-          <div className="h-10 w-10 rounded-xl bg-gradient-to-tr from-indigo-500 to-violet-600 flex items-center justify-center shadow-lg shadow-indigo-500/25">
-            <GraduationCap className="h-6 w-6 text-white" />
-          </div>
-          <div>
-            <h1 className="font-bold text-xl bg-clip-text text-transparent bg-gradient-to-r from-indigo-400 to-violet-400">UniTask</h1>
-            <p className="text-xs text-slate-500">Teacher Workspace</p>
-          </div>
-        </div>
-
-        <div className="flex items-center gap-4">
-          <div className="hidden sm:flex items-center gap-2 px-3 py-1.5 rounded-xl bg-slate-900/60 border border-slate-800 text-slate-350 text-sm">
-            <User className="h-4 w-4 text-indigo-400" />
-            <span>{user.full_name}</span>
-          </div>
-          <button 
-            onClick={handleLogout}
-            className="flex items-center gap-2 px-4 py-2 rounded-xl bg-slate-900 hover:bg-slate-800 text-slate-300 hover:text-white transition-all text-sm font-semibold border border-slate-800 hover:border-slate-700"
-          >
-            <LogOut className="h-4 w-4" />
-            Chiqish
-          </button>
-        </div>
-      </header>
-
-      {/* Loading Overlay */}
-      {isLoadingPage ? (
-        <div className="flex-1 flex flex-col items-center justify-center gap-3">
-          <Loader2 className="h-8 w-8 text-indigo-500 animate-spin" />
-          <p className="text-slate-400 text-sm">Ma'lumotlar yuklanmoqda...</p>
-        </div>
-      ) : (
-        <main className="flex-1 max-w-7xl w-full mx-auto p-6 md:p-8 space-y-8 animate-fadeIn">
-          
-          {/* Dashboard Welcome Header */}
-          <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4 bg-slate-900/20 border border-slate-900 rounded-3xl p-6 md:p-8 backdrop-blur-sm">
-            <div>
-              <h2 className="text-2xl md:text-3xl font-extrabold text-white mb-2">
-                Salom, {user.full_name || "Hurmatli O'qituvchi"}!
-              </h2>
-              <p className="text-slate-400 text-sm md:text-base">
-                Bugun yangi topshiriqlar yarating yoki talabalar yuborgan javoblarni baholang.
-              </p>
+      {/* Sidebar Navigation */}
+      <aside className={`transition-all duration-300 ${isSidebarCollapsed ? 'w-20' : 'w-80'} bg-slate-900/40 border-r border-slate-900 flex flex-col justify-between backdrop-blur-xl shrink-0 overflow-hidden`}>
+        <div>
+          {/* Logo */}
+          {isSidebarCollapsed ? (
+            <div className="p-6 border-b border-slate-900 flex items-center justify-center">
+              <div className="h-10 w-10 rounded-xl bg-gradient-to-tr from-indigo-500 to-violet-650 flex items-center justify-center shadow-lg shadow-indigo-500/20">
+                <GraduationCap className="h-5.5 w-5.5 text-white" />
+              </div>
             </div>
-            <div>
-              <button
-                onClick={() => setIsModalOpen(true)}
-                className="flex items-center gap-2 px-5 py-3 rounded-2xl bg-gradient-to-r from-indigo-500 to-violet-600 text-white font-bold text-sm shadow-lg shadow-indigo-500/20 hover:shadow-indigo-500/30 transition-all hover:scale-[1.01] active:scale-[0.99] cursor-pointer"
-              >
-                <Plus className="h-5 w-5" />
-                Yangi vazifa yaratish
-              </button>
+          ) : (
+            <div className="p-6 border-b border-slate-900 flex items-center gap-3">
+              <div className="h-10 w-10 rounded-xl bg-gradient-to-tr from-indigo-500 to-violet-650 flex items-center justify-center shadow-lg shadow-indigo-500/20">
+                <GraduationCap className="h-5.5 w-5.5 text-white" />
+              </div>
+              <div>
+                <h1 className="text-lg font-black tracking-tight bg-gradient-to-r from-white to-slate-400 bg-clip-text text-transparent">UniTask</h1>
+                <p className="text-[10px] text-slate-500 font-bold uppercase tracking-wider">Teacher Workspace</p>
+              </div>
             </div>
-          </div>
+          )}
 
-          {/* Tab Navigation (Premium Capsule Slider) */}
-          <div className="bg-slate-900/40 border border-slate-850 p-1.5 rounded-2xl flex gap-1.5 w-fit">
+          {/* User Profile */}
+          {isSidebarCollapsed ? (
+            <div className="p-5 border-b border-slate-900 flex items-center justify-center">
+              <div className="h-10 w-10 rounded-full bg-slate-800 border border-slate-700/60 flex items-center justify-center font-bold text-indigo-400 uppercase">
+                {user.full_name ? user.full_name.substring(0, 2) : 'T'}
+              </div>
+            </div>
+          ) : (
+            <div className="p-5 border-b border-slate-900">
+              <div className="flex items-center gap-3">
+                <div className="h-10 w-10 rounded-full bg-slate-800 border border-slate-700/60 flex items-center justify-center font-bold text-indigo-400 uppercase">
+                  {user.full_name ? user.full_name.substring(0, 2) : 'T'}
+                </div>
+                <div>
+                  <h3 className="text-sm font-bold leading-tight">{user.full_name || 'O\'qituvchi'}</h3>
+                  <p className="text-xs text-indigo-400 font-semibold mt-0.5">O'qituvchi</p>
+                </div>
+              </div>
+            </div>
+          )}
+
+          {/* Navigation Links */}
+          <nav className="p-4 space-y-2.5">
             <button
               onClick={() => setActiveTab('assignments')}
-              className={`px-6 py-2.5 rounded-xl text-sm font-bold transition-all cursor-pointer ${
-                activeTab === 'assignments'
-                  ? 'bg-gradient-to-r from-indigo-500 to-violet-600 text-white shadow-lg shadow-indigo-500/10'
-                  : 'text-slate-400 hover:text-slate-200 hover:bg-slate-900/50'
+              className={`w-full flex items-center ${isSidebarCollapsed ? 'justify-center' : 'gap-3.5 px-4.5'} py-3 rounded-2xl text-sm font-bold transition-all ${
+                activeTab === 'assignments' 
+                  ? 'bg-gradient-to-r from-indigo-500/10 to-violet-500/5 border border-indigo-500/20 text-white' 
+                  : 'border border-transparent text-slate-400 hover:text-white hover:bg-slate-900/30'
               }`}
             >
-              Vazifalar boshqaruvi
+              <FileText className={`h-4.5 w-4.5 ${activeTab === 'assignments' ? 'text-indigo-400' : 'text-slate-500'}`} />
+              {!isSidebarCollapsed && <span>Vazifalar boshqaruvi</span>}
             </button>
             <button
               onClick={() => setActiveTab('attendance')}
-              className={`px-6 py-2.5 rounded-xl text-sm font-bold transition-all cursor-pointer ${
-                activeTab === 'attendance'
-                  ? 'bg-gradient-to-r from-indigo-500 to-violet-600 text-white shadow-lg shadow-indigo-500/10'
-                  : 'text-slate-400 hover:text-slate-200 hover:bg-slate-900/50'
+              className={`w-full flex items-center ${isSidebarCollapsed ? 'justify-center' : 'gap-3.5 px-4.5'} py-3 rounded-2xl text-sm font-bold transition-all ${
+                activeTab === 'attendance' 
+                  ? 'bg-gradient-to-r from-indigo-500/10 to-violet-500/5 border border-indigo-500/20 text-white' 
+                  : 'border border-transparent text-slate-400 hover:text-white hover:bg-slate-900/30'
               }`}
             >
-              Davomat jurnali
+              <Calendar className={`h-4.5 w-4.5 ${activeTab === 'attendance' ? 'text-indigo-400' : 'text-slate-500'}`} />
+              {!isSidebarCollapsed && <span>Davomat jurnali</span>}
             </button>
             <button
               onClick={() => setActiveTab('gradebook')}
-              className={`px-6 py-2.5 rounded-xl text-sm font-bold transition-all cursor-pointer ${
-                activeTab === 'gradebook'
-                  ? 'bg-gradient-to-r from-indigo-500 to-violet-600 text-white shadow-lg shadow-indigo-500/10'
-                  : 'text-slate-400 hover:text-slate-200 hover:bg-slate-900/50'
+              className={`w-full flex items-center ${isSidebarCollapsed ? 'justify-center' : 'gap-3.5 px-4.5'} py-3 rounded-2xl text-sm font-bold transition-all ${
+                activeTab === 'gradebook' 
+                  ? 'bg-gradient-to-r from-indigo-500/10 to-violet-500/5 border border-indigo-500/20 text-white' 
+                  : 'border border-transparent text-slate-400 hover:text-white hover:bg-slate-900/30'
               }`}
             >
-              Baholar jurnali
+              <Users className={`h-4.5 w-4.5 ${activeTab === 'gradebook' ? 'text-indigo-400' : 'text-slate-500'}`} />
+              {!isSidebarCollapsed && <span>Baholar jurnali</span>}
             </button>
             <button
               onClick={() => setActiveTab('timetable')}
-              className={`px-6 py-2.5 rounded-xl text-sm font-bold transition-all cursor-pointer ${
-                activeTab === 'timetable'
-                  ? 'bg-gradient-to-r from-indigo-500 to-violet-600 text-white shadow-lg shadow-indigo-500/10'
-                  : 'text-slate-400 hover:text-slate-200 hover:bg-slate-900/50'
+              className={`w-full flex items-center ${isSidebarCollapsed ? 'justify-center' : 'gap-3.5 px-4.5'} py-3 rounded-2xl text-sm font-bold transition-all ${
+                activeTab === 'timetable' 
+                  ? 'bg-gradient-to-r from-indigo-500/10 to-violet-500/5 border border-indigo-500/20 text-white' 
+                  : 'border border-transparent text-slate-400 hover:text-white hover:bg-slate-900/30'
               }`}
             >
-              Dars jadvali
+              <Calendar className={`h-4.5 w-4.5 ${activeTab === 'timetable' ? 'text-indigo-400' : 'text-slate-500'}`} />
+              {!isSidebarCollapsed && <span>Dars jadvali</span>}
+            </button>
+          </nav>
+
+          {/* Collapse Sidebar Button */}
+          <div className="px-4 py-2 border-t border-slate-900/50">
+            <button
+              onClick={toggleSidebar}
+              className="w-full flex items-center justify-center gap-2 py-2 px-3 rounded-xl border border-slate-900 hover:border-slate-800 text-slate-500 hover:text-slate-350 transition-all text-xs font-bold cursor-pointer"
+            >
+              {isSidebarCollapsed ? <ChevronRight className="h-4 w-4" /> : <span className="flex items-center gap-1.5"><ChevronLeft className="h-4 w-4" /> Sidebar Yopish</span>}
             </button>
           </div>
+        </div>
+      </aside>
+
+      {/* Main Content Area */}
+      <main className="flex-1 min-w-0 flex flex-col">
+        {/* Top Header */}
+        <header className="h-16 border-b border-slate-900 px-6 flex items-center justify-between bg-slate-950/40 backdrop-blur-md sticky top-0 z-40">
+          <div className="flex items-center gap-2">
+            <span className="text-slate-500 font-bold text-xs">Workspace</span>
+            <span className="text-slate-700 text-xs">/</span>
+            <span className="text-white font-extrabold text-xs capitalize">
+              {activeTab === 'assignments' ? 'Vazifalar boshqaruvi' : activeTab === 'attendance' ? 'Davomat jurnali' : activeTab === 'gradebook' ? 'Baholar jurnali' : 'Dars jadvali'}
+            </span>
+          </div>
+          <div className="flex items-center gap-4">
+        {/* User display & logout */}
+        <div className="flex items-center gap-3">
+          <div className="hidden sm:flex items-center gap-2 px-3 py-1.5 rounded-xl bg-slate-900/60 border border-slate-800 text-slate-350 text-xs font-semibold">
+            <User className="h-3.5 w-3.5 text-indigo-400" />
+            <span>{user.full_name}</span>
+          </div>
+          <button 
+            onClick={() => {
+              localStorage.removeItem('unitask_user');
+              localStorage.removeItem('user');
+              navigate('/');
+            }}
+            className="flex items-center gap-1.5 py-1.5 px-3 rounded-xl border border-slate-800 hover:border-slate-700 text-slate-400 hover:text-rose-455 bg-slate-900/30 hover:bg-rose-950/10 transition-all text-xs font-bold cursor-pointer"
+          >
+            <LogOut className="h-3.5 w-3.5" />
+            <span>Chiqish</span>
+          </button>
+        </div>
+
+            {/* Notifications Bell */}
+            <div className="relative">
+              <button
+                onClick={handleBellClick}
+                className="relative p-2 rounded-lg bg-slate-900 border border-slate-800 text-slate-400 hover:text-white transition-all hover:bg-slate-800 cursor-pointer"
+              >
+                <Bell className="h-4 w-4" />
+                {unreadCount > 0 && (
+                  <span className="absolute -top-1 -right-1 h-3.5 w-3.5 rounded-full bg-rose-500 border-2 border-slate-950 flex items-center justify-center text-[9px] font-extrabold text-white animate-pulse">
+                    {unreadCount}
+                  </span>
+                )}
+              </button>
+
+              {isNotifOpen && (
+                <>
+                  <div className="fixed inset-0 z-40" onClick={() => setIsNotifOpen(false)} />
+                  <div ref={notifRef} className="absolute right-0 mt-3 w-80 bg-slate-900 border border-slate-800 rounded-2xl shadow-2xl p-4 z-50 animate-fadeIn space-y-3">
+                    <div className="flex items-center justify-between border-b border-slate-850 pb-2.5">
+                      <h4 className="font-bold text-sm text-white">Bildirishnomalar</h4>
+                      <span className="text-xs px-2 py-0.5 rounded-full bg-slate-950 text-slate-400 font-semibold border border-slate-850">
+                        {notifications.length} ta
+                      </span>
+                    </div>
+
+                    <div className="max-h-60 overflow-y-auto divide-y divide-slate-850/65 pr-1 space-y-1">
+                      {notifications.length === 0 ? (
+                        <div className="py-8 text-center text-xs text-slate-500 font-medium">
+                          Hozircha bildirishnomalar yo'q
+                        </div>
+                      ) : (
+                        notifications.map(notif => (
+                          <div key={notif.id} className="py-2.5 space-y-1 text-left">
+                            <div className="flex items-center justify-between">
+                              <span className={`font-bold text-xs ${notif.is_read ? 'text-slate-400' : 'text-indigo-400'}`}>
+                                {notif.title}
+                              </span>
+                              <span className="text-[9px] text-slate-550 text-slate-500 font-medium">
+                                {new Date(notif.created_at).toLocaleTimeString('uz-UZ', { hour: '2-digit', minute: '2-digit' })}
+                              </span>
+                            </div>
+                            <p className="text-slate-350 text-xs leading-relaxed font-medium">
+                              {notif.message}
+                            </p>
+                          </div>
+                        ))
+                      )}
+                    </div>
+                  </div>
+                </>
+              )}
+            </div>
+          </div>
+        </header>
+
+        {/* Dynamic Content Scrollable Body */}
+        <div className="flex-1 overflow-y-auto p-4 md:p-6 custom-scrollbar space-y-6">
+          {isLoadingPage ? (
+            <div className="h-full flex flex-col items-center justify-center gap-3">
+              <Loader2 className="h-8 w-8 text-indigo-500 animate-spin" />
+              <p className="text-slate-400 text-sm">Ma'lumotlar yuklanmoqda...</p>
+            </div>
+          ) : (
+            <>
+              {/* Dashboard Welcome Header */}
+              <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4 bg-slate-900/20 border border-slate-900 rounded-2xl p-3 md:p-4 backdrop-blur-sm">
+                <div>
+                  <h2 className="text-lg md:text-xl font-extrabold text-white">
+                    Salom, {user.full_name || "Hurmatli O'qituvchi"}!
+                  </h2>
+                  <p className="text-slate-400 text-xs font-medium mt-0.5">
+                    Bugun yangi topshiriqlar yarating yoki talabalar yuborgan javoblarni baholang.
+                  </p>
+                </div>
+                <div>
+                  <button
+                    onClick={() => { setSelectedFile(null); setIsModalOpen(true); }}
+                    className="flex items-center gap-2 px-4 py-2 rounded-xl bg-gradient-to-r from-indigo-500 to-violet-600 text-white font-bold text-xs shadow-lg shadow-indigo-500/20 hover:shadow-indigo-500/30 transition-all hover:scale-[1.01] active:scale-[0.99] cursor-pointer"
+                  >
+                    <Plus className="h-4 w-4" />
+                    Yangi vazifa yaratish
+                  </button>
+                </div>
+              </div>
 
           {/* General Messages */}
           {successMsg && (
@@ -1003,14 +1517,27 @@ export default function TeacherDashboard() {
             
             {/* Left Column: Assignments List */}
             <div className="lg:col-span-2 space-y-6">
-              <div className="flex items-center gap-3">
-                <div className="h-8 w-8 rounded-lg bg-indigo-500/10 border border-indigo-500/20 flex items-center justify-center text-indigo-400">
-                  <FileText className="h-4.5 w-4.5" />
+              <div className="flex flex-col sm:flex-row gap-4 justify-between items-start sm:items-center">
+                <div className="flex items-center gap-3">
+                  <div className="h-8 w-8 rounded-lg bg-indigo-500/10 border border-indigo-500/20 flex items-center justify-center text-indigo-400">
+                    <FileText className="h-4.5 w-4.5" />
+                  </div>
+                  <h3 className="text-xl font-bold text-white">Yuborilgan Vazifalar ({filteredAssignments.length})</h3>
                 </div>
-                <h3 className="text-xl font-bold text-white">Yuborilgan Vazifalar ({assignments.length})</h3>
+                {/* Search Bar */}
+                <div className="relative w-full sm:w-64">
+                  <Search className="absolute left-3.5 top-1/2 -translate-y-1/2 h-3.5 w-3.5 text-slate-500" />
+                  <input
+                    type="text"
+                    placeholder="Vazifalarni qidirish..."
+                    value={assignmentsSearchQuery}
+                    onChange={(e) => setAssignmentsSearchQuery(e.target.value)}
+                    className="w-full bg-slate-950/60 border border-slate-900 rounded-xl py-2 pl-9 pr-4 text-xs font-semibold text-white outline-none focus:border-indigo-500 focus:ring-1 focus:ring-indigo-500/20 placeholder:text-slate-650 transition-all"
+                  />
+                </div>
               </div>
 
-              {assignments.length === 0 ? (
+              {filteredAssignments.length === 0 ? (
                 /* Empty State */
                 <div className="border border-dashed border-slate-800/80 rounded-3xl p-12 text-center flex flex-col items-center justify-center gap-4">
                   <div className="h-16 w-16 rounded-2xl bg-slate-900 border border-slate-850 flex items-center justify-center text-slate-600">
@@ -1018,15 +1545,15 @@ export default function TeacherDashboard() {
                   </div>
                   <div>
                     <h4 className="text-lg font-bold text-slate-300 mb-1">Hozircha vazifalar yo'q</h4>
-                    <p className="text-slate-500 text-sm max-w-xs">
-                      Talabalar uchun yangi vazifalar yaratib, ularni guruhlar bo'yicha yuboring.
+                    <p className="text-slate-500 text-sm max-w-xs font-medium">
+                      {assignmentsSearchQuery ? "Qidiruv bo'yicha hech qanday vazifa topilmadi." : "Talabalar uchun yangi vazifalar yaratib, ularni guruhlar bo'yicha yuboring."}
                     </p>
                   </div>
                 </div>
               ) : (
                 /* Assignments Grid */
                 <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-                  {assignments.map((assignment) => {
+                  {filteredAssignments.map((assignment) => {
                     const status = getDeadlineStatus(assignment.deadline);
                     return (
                       <div 
@@ -1058,6 +1585,19 @@ export default function TeacherDashboard() {
                             <p className="text-slate-400 text-sm line-clamp-3 mt-1.5 leading-relaxed font-medium">
                               {assignment.description}
                             </p>
+                            {assignment.file_url && (
+                              <div className="mt-2.5">
+                                <a
+                                  href={assignment.file_url}
+                                  target="_blank"
+                                  rel="noopener noreferrer"
+                                  className="inline-flex items-center gap-1.5 py-1 px-2.5 rounded-lg border border-indigo-500/20 bg-indigo-500/10 hover:bg-indigo-500/20 text-indigo-350 hover:text-white transition-all text-[11px] font-bold cursor-pointer"
+                                >
+                                  <Paperclip className="h-3 w-3 text-indigo-400" />
+                                  <span>Biriktirilgan fayl</span>
+                                </a>
+                              </div>
+                            )}
                           </div>
                         </div>
 
@@ -1230,7 +1770,7 @@ export default function TeacherDashboard() {
           <div className="bg-slate-900/20 border border-slate-900 rounded-3xl p-6 md:p-8 backdrop-blur-sm space-y-6">
             <h3 className="text-xl font-bold text-white mb-4">Davomat Filtrlar</h3>
             
-            <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+            <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
               {/* Date Picker */}
               <div>
                 <label className="block text-slate-350 text-sm font-semibold mb-2 ml-1" htmlFor="attendance-date">
@@ -1241,7 +1781,7 @@ export default function TeacherDashboard() {
                   type="date"
                   value={attendanceDate}
                   onChange={(e) => setAttendanceDate(e.target.value)}
-                  className="w-full bg-slate-955 bg-slate-950/60 border border-slate-800 text-white rounded-2xl py-3.5 px-4 text-sm outline-none focus:border-indigo-500 focus:ring-2 focus:ring-indigo-500/20 transition-all font-medium cursor-pointer"
+                  className="[color-scheme:dark] w-full bg-slate-955 bg-slate-950/60 border border-slate-800 text-white rounded-2xl py-3.5 px-4 text-sm outline-none focus:border-indigo-500 focus:ring-2 focus:ring-indigo-500/20 transition-all font-medium cursor-pointer"
                 />
               </div>
 
@@ -1274,6 +1814,24 @@ export default function TeacherDashboard() {
                       <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M19 9l-7 7-7-7" />
                     </svg>
                   </div>
+                </div>
+              </div>
+
+              {/* Search Bar for Attendance */}
+              <div>
+                <label className="block text-slate-350 text-sm font-semibold mb-2 ml-1">
+                  Talabani qidirish
+                </label>
+                <div className="relative">
+                  <Search className="absolute left-3.5 top-1/2 -translate-y-1/2 h-3.5 w-3.5 text-slate-500" />
+                  <input
+                    type="text"
+                    disabled={!selectedRelationId}
+                    placeholder={selectedRelationId ? "Ism bo'yicha qidirish..." : "Dars tanlanmagan"}
+                    value={attendanceSearchQuery}
+                    onChange={(e) => setAttendanceSearchQuery(e.target.value)}
+                    className="w-full bg-slate-955 bg-slate-950/60 border border-slate-800 text-white rounded-2xl py-3.5 pl-10 pr-4 text-sm font-semibold outline-none focus:border-indigo-500 focus:ring-2 focus:ring-indigo-500/20 placeholder:text-slate-650 transition-all disabled:opacity-50 disabled:cursor-not-allowed"
+                  />
                 </div>
               </div>
             </div>
@@ -1320,14 +1878,38 @@ export default function TeacherDashboard() {
                 <div className="overflow-x-auto">
                   <table className="w-full text-left border-collapse">
                     <thead>
-                      <tr className="border-b border-slate-800 bg-slate-950/40 text-slate-400 text-xs font-bold uppercase tracking-wider">
+                      <tr className="border-b border-slate-800 bg-slate-950/40 text-slate-400 text-xs font-bold uppercase tracking-wider select-none">
                         <th className="py-4.5 px-6 w-16">#</th>
-                        <th className="py-4.5 px-6">Talabaning F.I.Sh.</th>
-                        <th className="py-4.5 px-6 text-center w-96">Davomat holati</th>
+                        <th 
+                          onClick={() => handleAttendanceSort('full_name')}
+                          className="py-4.5 px-6 cursor-pointer hover:bg-slate-900/40 hover:text-white transition-colors group"
+                        >
+                          <div className="flex items-center gap-1">
+                            <span>Talabaning F.I.Sh.</span>
+                            {attendanceSortConfig.key === 'full_name' ? (
+                              attendanceSortConfig.direction === 'asc' ? <ArrowUp className="h-3 w-3 text-indigo-400" /> : <ArrowDown className="h-3 w-3 text-indigo-400" />
+                            ) : (
+                              <ArrowUpDown className="h-3 w-3 text-slate-600 opacity-0 group-hover:opacity-100 transition-opacity" />
+                            )}
+                          </div>
+                        </th>
+                        <th 
+                          onClick={() => handleAttendanceSort('status')}
+                          className="py-4.5 px-6 text-center w-96 cursor-pointer hover:bg-slate-900/40 hover:text-white transition-colors group"
+                        >
+                          <div className="flex items-center justify-center gap-1">
+                            <span>Davomat holati</span>
+                            {attendanceSortConfig.key === 'status' ? (
+                              attendanceSortConfig.direction === 'asc' ? <ArrowUp className="h-3 w-3 text-indigo-400" /> : <ArrowDown className="h-3 w-3 text-indigo-400" />
+                            ) : (
+                              <ArrowUpDown className="h-3 w-3 text-slate-600 opacity-0 group-hover:opacity-100 transition-opacity" />
+                            )}
+                          </div>
+                        </th>
                       </tr>
                     </thead>
                     <tbody className="divide-y divide-slate-800/60 text-slate-300">
-                      {students.map((student, idx) => {
+                      {sortedAttendanceStudents.map((student, idx) => {
                         const currentStatus = attendanceRecords[student.id] || 'present';
                         return (
                           <tr key={student.id} className="hover:bg-slate-900/20 transition-colors">
@@ -1412,9 +1994,9 @@ export default function TeacherDashboard() {
           <div className="bg-slate-900/20 border border-slate-900 rounded-3xl p-6 md:p-8 backdrop-blur-sm space-y-6">
             <h3 className="text-xl font-bold text-white mb-4">Baholar Jurnali Filtrlar</h3>
             
-            <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+            <div className="flex flex-col md:flex-row md:items-end justify-between gap-6">
               {/* Class Dropdown */}
-              <div>
+              <div className="flex-1 max-w-md">
                 <label className="block text-slate-350 text-sm font-semibold mb-2 ml-1" htmlFor="gradebook-relation">
                   Darsni tanlang
                 </label>
@@ -1444,6 +2026,34 @@ export default function TeacherDashboard() {
                   </div>
                 </div>
               </div>
+
+              {/* Search Bar for Gradebook */}
+              {gradebookRelationId && (
+                <div className="relative w-full sm:w-64">
+                  <Search className="absolute left-3.5 top-1/2 -translate-y-1/2 h-3.5 w-3.5 text-slate-500" />
+                  <input
+                    type="text"
+                    placeholder="Talabani qidirish..."
+                    value={gradebookSearchQuery}
+                    onChange={(e) => setGradebookSearchQuery(e.target.value)}
+                    className="w-full bg-slate-955 bg-slate-950/60 border border-slate-800 rounded-2xl py-3 pl-10 pr-4 text-sm font-semibold text-white outline-none focus:border-indigo-500 focus:ring-2 focus:ring-indigo-500/20 placeholder:text-slate-650 transition-all"
+                  />
+                </div>
+              )}
+
+              {/* CSV Download Button */}
+              {gradebookRelationId && gradebookStudents && gradebookStudents.length > 0 && (
+                <button
+                  type="button"
+                  onClick={exportToCSV}
+                  className="flex items-center gap-2 px-6 py-3.5 rounded-2xl bg-gradient-to-r from-indigo-500 to-violet-600 hover:from-indigo-650 hover:to-violet-750 text-white font-bold text-sm shadow-lg shadow-indigo-500/20 hover:shadow-indigo-500/30 transition-all hover:scale-[1.01] active:scale-[0.99] cursor-pointer animate-fadeIn"
+                >
+                  <svg className="h-5 w-5 text-white" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1M12 4v12m0 0l4-4m-4 4l-4-4" />
+                  </svg>
+                  Jadvalni yuklab olish (CSV)
+                </button>
+              )}
             </div>
           </div>
 
@@ -1482,46 +2092,161 @@ export default function TeacherDashboard() {
                 <div className="overflow-x-auto">
                   <table className="w-full text-left border-collapse min-w-[1100px]">
                     <thead>
-                      <tr className="border-b border-slate-800 bg-slate-955/40 text-slate-400 text-xs font-bold uppercase tracking-wider">
+                      <tr className="border-b border-slate-800 bg-slate-955/40 text-slate-400 text-xs font-bold uppercase tracking-wider select-none">
                         <th className="py-4.5 px-6 w-16 text-center">#</th>
-                        <th className="py-4.5 px-6 min-w-[220px]">Talaba F.I.Sh.</th>
-                        <th className="py-4.5 px-6 text-center w-40">Joriy nazorat</th>
-                        <th className="py-4.5 px-6 text-center w-44">1-Oraliq (Max 15)</th>
-                        <th className="py-4.5 px-6 text-center w-44">2-Oraliq (Max 15)</th>
-                        <th className="py-4.5 px-6 text-center w-36 bg-slate-955/20 text-slate-350">Jami</th>
-                        <th className="py-4.5 px-6 text-center w-44">Sessiya holati</th>
-                        <th className="py-4.5 px-6 text-center w-48">Yakuniy nazorat (Max 40)</th>
-                        <th className="py-4.5 px-6 text-center w-36 bg-indigo-950/20 text-indigo-400">Umumiy ball</th>
+                        <th 
+                          onClick={() => handleGradebookSort('full_name')}
+                          className="py-4.5 px-6 min-w-[220px] cursor-pointer hover:bg-slate-900/40 hover:text-white transition-colors group"
+                        >
+                          <div className="flex items-center gap-1">
+                            <span>Talaba F.I.Sh.</span>
+                            {gradebookSortConfig.key === 'full_name' ? (
+                              gradebookSortConfig.direction === 'asc' ? <ArrowUp className="h-3 w-3 text-indigo-400" /> : <ArrowDown className="h-3 w-3 text-indigo-400" />
+                            ) : (
+                              <ArrowUpDown className="h-3 w-3 text-slate-600 opacity-0 group-hover:opacity-100 transition-opacity" />
+                            )}
+                          </div>
+                        </th>
+                        <th 
+                          onClick={() => handleGradebookSort('Amaliyot')}
+                          className="py-4.5 px-6 text-center w-40 cursor-pointer hover:bg-slate-900/40 hover:text-white transition-colors group"
+                        >
+                          <div className="flex items-center justify-center gap-1">
+                            <span>Joriy nazorat</span>
+                            {gradebookSortConfig.key === 'Amaliyot' ? (
+                              gradebookSortConfig.direction === 'asc' ? <ArrowUp className="h-3 w-3 text-indigo-400" /> : <ArrowDown className="h-3 w-3 text-indigo-400" />
+                            ) : (
+                              <ArrowUpDown className="h-3 w-3 text-slate-600 opacity-0 group-hover:opacity-100 transition-opacity" />
+                            )}
+                          </div>
+                        </th>
+                        <th 
+                          onClick={() => handleGradebookSort('1-Oraliq')}
+                          className="py-4.5 px-6 text-center w-44 cursor-pointer hover:bg-slate-900/40 hover:text-white transition-colors group"
+                        >
+                          <div className="flex items-center justify-center gap-1">
+                            <span>1-Oraliq (Max 15)</span>
+                            {gradebookSortConfig.key === '1-Oraliq' ? (
+                              gradebookSortConfig.direction === 'asc' ? <ArrowUp className="h-3 w-3 text-indigo-400" /> : <ArrowDown className="h-3 w-3 text-indigo-400" />
+                            ) : (
+                              <ArrowUpDown className="h-3 w-3 text-slate-600 opacity-0 group-hover:opacity-100 transition-opacity" />
+                            )}
+                          </div>
+                        </th>
+                        <th 
+                          onClick={() => handleGradebookSort('2-Oraliq')}
+                          className="py-4.5 px-6 text-center w-44 cursor-pointer hover:bg-slate-900/40 hover:text-white transition-colors group"
+                        >
+                          <div className="flex items-center justify-center gap-1">
+                            <span>2-Oraliq (Max 15)</span>
+                            {gradebookSortConfig.key === '2-Oraliq' ? (
+                              gradebookSortConfig.direction === 'asc' ? <ArrowUp className="h-3 w-3 text-indigo-400" /> : <ArrowDown className="h-3 w-3 text-indigo-400" />
+                            ) : (
+                              <ArrowUpDown className="h-3 w-3 text-slate-600 opacity-0 group-hover:opacity-100 transition-opacity" />
+                            )}
+                          </div>
+                        </th>
+                        <th 
+                          onClick={() => handleGradebookSort('Jami')}
+                          className="py-4.5 px-6 text-center w-36 bg-slate-955/20 text-slate-355 cursor-pointer hover:bg-slate-900/40 hover:text-white transition-colors group"
+                        >
+                          <div className="flex items-center justify-center gap-1">
+                            <span>Jami</span>
+                            {gradebookSortConfig.key === 'Jami' ? (
+                              gradebookSortConfig.direction === 'asc' ? <ArrowUp className="h-3 w-3 text-indigo-400" /> : <ArrowDown className="h-3 w-3 text-indigo-400" />
+                            ) : (
+                              <ArrowUpDown className="h-3 w-3 text-slate-600 opacity-0 group-hover:opacity-100 transition-opacity" />
+                            )}
+                          </div>
+                        </th>
+                        <th className="py-4.5 px-6 text-center w-44 text-slate-400">Sessiya holati</th>
+                        <th 
+                          onClick={() => handleGradebookSort('Yakuniy')}
+                          className="py-4.5 px-6 text-center w-48 cursor-pointer hover:bg-slate-900/40 hover:text-white transition-colors group"
+                        >
+                          <div className="flex items-center justify-center gap-1">
+                            <span>Yakuniy nazorat (Max 40)</span>
+                            {gradebookSortConfig.key === 'Yakuniy' ? (
+                              gradebookSortConfig.direction === 'asc' ? <ArrowUp className="h-3 w-3 text-indigo-400" /> : <ArrowDown className="h-3 w-3 text-indigo-400" />
+                            ) : (
+                              <ArrowUpDown className="h-3 w-3 text-slate-600 opacity-0 group-hover:opacity-100 transition-opacity" />
+                            )}
+                          </div>
+                        </th>
+                        <th 
+                          onClick={() => handleGradebookSort('totalBall')}
+                          className="py-4.5 px-6 text-center w-36 bg-indigo-950/20 text-indigo-400 cursor-pointer hover:bg-indigo-950/40 hover:text-white transition-colors group"
+                        >
+                          <div className="flex items-center justify-center gap-1">
+                            <span>Umumiy ball</span>
+                            {gradebookSortConfig.key === 'totalBall' ? (
+                              gradebookSortConfig.direction === 'asc' ? <ArrowUp className="h-3 w-3 text-indigo-400" /> : <ArrowDown className="h-3 w-3 text-indigo-400" />
+                            ) : (
+                              <ArrowUpDown className="h-3 w-3 text-indigo-400 opacity-0 group-hover:opacity-100 transition-opacity" />
+                            )}
+                          </div>
+                        </th>
                         <th className="py-4.5 px-6 text-center w-44">O'zlashtirish</th>
                       </tr>
                     </thead>
                     <tbody className="divide-y divide-slate-800/60 text-slate-300">
-                      {gradebookStudents.map((student, idx) => {
-                        // Joriy nazorat (Amaliyot) - SUM of assignment scores (raw)
-                        const gradedSubmissions = gradebookAssignments.map(assignment => {
-                          const sub = gradebookSubmissions.find(s => s.assignment_id === assignment.id && s.student_id === student.id);
-                          return (sub && typeof sub.score === 'number') ? sub.score : 0;
-                        });
-                        const rawJoriy = gradedSubmissions.reduce((a, b) => a + b, 0);
+                      {sortedGradebookStudents.map((student, idx) => {
+                        // Find exam scores
+                        const getExamScore = (title) => {
+                          const ass = gradebookAssignments.find(a => a.title === title);
+                          if (!ass) return '';
+                          const sub = gradebookSubmissions.find(s => s.assignment_id === ass.id && s.student_id === student.id);
+                          return (sub && typeof sub.score === 'number') ? sub.score.toString() : '';
+                        };
+
+                        // Joriy nazorat (Amaliyot yoki Laboratoriya) - SUM of assignment scores (raw)
+                        const joriySubmissions = gradebookAssignments
+                          .filter(assignment => {
+                            const typeName = assignment.lesson_types?.name;
+                            return (typeName === 'Amaliyot' || typeName === 'Laboratoriya') && assignment.title !== '1-Oraliq' && assignment.title !== '2-Oraliq' && assignment.title !== 'Yakuniy';
+                          })
+                          .map(assignment => {
+                            const sub = gradebookSubmissions.find(s => s.assignment_id === assignment.id && s.student_id === student.id);
+                            return (sub && typeof sub.score === 'number') ? sub.score : 0;
+                          });
+                        const rawJoriy = joriySubmissions.reduce((a, b) => a + b, 0);
                         const joriy = Math.min(rawJoriy, 30);
 
-                        // Oraliq 1 - Max 15
-                        const oraliq1 = oraliq1Scores[student.id] !== undefined ? oraliq1Scores[student.id] : 0;
-                        const oraliq1Val = oraliq1 === '' ? 0 : (parseFloat(oraliq1) || 0);
+                        // Ma'ruza online assignments sum for this student
+                        const lectureSubmissions = gradebookAssignments
+                          .filter(assignment => assignment.lesson_types?.name === 'Ma\'ruza' && assignment.title !== '1-Oraliq' && assignment.title !== '2-Oraliq' && assignment.title !== 'Yakuniy')
+                          .map(assignment => {
+                            const sub = gradebookSubmissions.find(s => s.assignment_id === assignment.id && s.student_id === student.id);
+                            return (sub && typeof sub.score === 'number') ? sub.score : 0;
+                          });
+                        const onlineMaruzaSum = lectureSubmissions.reduce((a, b) => a + b, 0);
+
+                        // Oraliq 1 - Max 15 (Directly online sum if exists, otherwise database grade)
+                        const oraliq1ScoreStr = getExamScore('1-Oraliq');
+                        const oraliq1ManualVal = oraliq1ScoreStr === '' ? 0 : (parseFloat(oraliq1ScoreStr) || 0);
+                        const oraliq1Val = onlineMaruzaSum > 0 ? Math.min(onlineMaruzaSum, 15) : Math.min(oraliq1ManualVal, 15);
 
                         // Oraliq 2 - Max 15
-                        const oraliq2 = oraliq2Scores[student.id] !== undefined ? oraliq2Scores[student.id] : 0;
-                        const oraliq2Val = oraliq2 === '' ? 0 : (parseFloat(oraliq2) || 0);
+                        const oraliq2ScoreStr = getExamScore('2-Oraliq');
+                        const oraliq2ManualVal = oraliq2ScoreStr === '' ? 0 : (parseFloat(oraliq2ScoreStr) || 0);
+                        const oraliq2Val = Math.min(oraliq2ManualVal, 15);
 
                         // Jami to'plangan ball (Max 60)
                         const jami = Math.min(joriy + oraliq1Val + oraliq2Val, 60);
 
-                        // Sessiya holati (Status): Allowed if Jami >= 36
-                        const isAllowed = jami >= 36;
+                        // Find student's contract
+                        const contract = contractsList.find(c => c.student_id === student.id);
+                        const baseAmount = contract ? (contract.base_amount ?? 16000000) : 16000000;
+                        const discountAmount = contract ? (contract.discount_amount ?? 0) : 0;
+                        const paidAmount = contract ? (contract.paid_amount ?? 0) : 0;
+                        const debt = Math.max(0, baseAmount - discountAmount - paidAmount);
+
+                        // Sessiya holati (Status): Allowed if Jami >= 36 and no debt
+                        const isAllowed = jami >= 36 && debt <= 0;
 
                         // Yakuniy nazorat (Sessiya) - Max 40
-                        const yakuniy = isAllowed && yakuniyScores[student.id] !== undefined ? yakuniyScores[student.id] : 0;
-                        const yakuniyVal = yakuniy === '' ? 0 : (parseFloat(yakuniy) || 0);
+                        const yakuniyScoreStr = getExamScore('Yakuniy');
+                        const yakuniyVal = isAllowed && yakuniyScoreStr !== '' ? (parseFloat(yakuniyScoreStr) || 0) : 0;
 
                         // Umumiy ball (Max 100)
                         const umumiy = jami + (isAllowed ? yakuniyVal : 0);
@@ -1539,32 +2264,34 @@ export default function TeacherDashboard() {
                               {joriy} ball
                             </td>
 
-                            {/* 1-Oraliq (Input field) */}
+                             {/* 1-Oraliq (Input field) */}
                             <td className="py-4 px-6">
-                              <div className="flex justify-center">
+                              <div className="flex flex-col items-center justify-center">
                                 <input 
                                   type="number"
                                   min="0"
                                   max="15"
                                   placeholder="0"
-                                  value={oraliq1Scores[student.id] !== undefined ? oraliq1Scores[student.id] : ''}
-                                  onChange={(e) => handleOraliq1Change(student.id, e.target.value)}
-                                  className="w-20 bg-slate-950/80 border border-slate-800 focus:border-indigo-500 text-white rounded-xl py-1.5 px-2.5 text-center text-sm outline-none focus:ring-1 focus:ring-indigo-500/25 transition-all font-semibold"
+                                  value={onlineMaruzaSum > 0 ? onlineMaruzaSum : oraliq1ScoreStr}
+                                  onChange={(e) => handleSaveGrade(student.id, '1-Oraliq', e.target.value)}
+                                  disabled={onlineMaruzaSum > 0 || !isLectureSelected}
+                                  className="w-20 bg-slate-950/80 border border-slate-800 focus:border-indigo-500 text-white rounded-xl py-1.5 px-2.5 text-center text-sm outline-none focus:ring-1 focus:ring-indigo-500/25 transition-all font-semibold disabled:opacity-30 disabled:cursor-not-allowed disabled:bg-slate-900/50"
                                 />
                               </div>
                             </td>
 
                             {/* 2-Oraliq (Input field) */}
                             <td className="py-4 px-6">
-                              <div className="flex justify-center">
+                              <div className="flex flex-col items-center justify-center">
                                 <input 
                                   type="number"
                                   min="0"
                                   max="15"
                                   placeholder="0"
-                                  value={oraliq2Scores[student.id] !== undefined ? oraliq2Scores[student.id] : ''}
-                                  onChange={(e) => handleOraliq2Change(student.id, e.target.value)}
-                                  className="w-20 bg-slate-950/80 border border-slate-800 focus:border-indigo-500 text-white rounded-xl py-1.5 px-2.5 text-center text-sm outline-none focus:ring-1 focus:ring-indigo-500/25 transition-all font-semibold"
+                                  value={oraliq2ScoreStr}
+                                  onChange={(e) => handleSaveGrade(student.id, '2-Oraliq', e.target.value)}
+                                  disabled={!isLectureSelected}
+                                  className="w-20 bg-slate-950/80 border border-slate-800 focus:border-indigo-500 text-white rounded-xl py-1.5 px-2.5 text-center text-sm outline-none focus:ring-1 focus:ring-indigo-500/25 transition-all font-semibold disabled:opacity-30 disabled:cursor-not-allowed disabled:bg-slate-900/50"
                                 />
                               </div>
                             </td>
@@ -1576,13 +2303,17 @@ export default function TeacherDashboard() {
 
                             {/* Sessiya holati */}
                             <td className="py-4 px-6 text-center">
-                              {isAllowed ? (
-                                <span className="inline-block px-2.5 py-1 rounded-lg bg-emerald-950/30 border border-emerald-900/50 text-emerald-400 text-xs font-bold">
-                                  Ruxsat berilgan
+                              {debt > 0 ? (
+                                <span className="inline-block px-2.5 py-1 rounded-lg bg-rose-950/30 border border-rose-900/50 text-rose-400 text-xs font-extrabold uppercase">
+                                  Kiritilmadi (Qarz)
+                                </span>
+                              ) : jami < 36 ? (
+                                <span className="inline-block px-2.5 py-1 rounded-lg bg-rose-950/30 border border-rose-900/50 text-rose-400 text-xs font-extrabold uppercase">
+                                  Kiritilmadi (Past ball)
                                 </span>
                               ) : (
-                                <span className="inline-block px-2.5 py-1 rounded-lg bg-rose-950/30 border border-rose-900/50 text-rose-400 text-xs font-bold">
-                                  Kiritilmadi
+                                <span className="inline-block px-2.5 py-1 rounded-lg bg-emerald-950/30 border border-emerald-900/50 text-emerald-400 text-xs font-extrabold uppercase">
+                                  Ruxsat berilgan
                                 </span>
                               )}
                             </td>
@@ -1595,8 +2326,8 @@ export default function TeacherDashboard() {
                                   min="0"
                                   max="40"
                                   placeholder="0"
-                                  value={isAllowed && yakuniyScores[student.id] !== undefined ? yakuniyScores[student.id] : ''}
-                                  onChange={(e) => handleYakuniyChange(student.id, e.target.value)}
+                                  value={isAllowed ? yakuniyScoreStr : ''}
+                                  onChange={(e) => handleSaveGrade(student.id, 'Yakuniy', e.target.value)}
                                   disabled={!isAllowed}
                                   className="w-20 bg-slate-950/80 border border-slate-800 focus:border-indigo-500 text-white rounded-xl py-1.5 px-2.5 text-center text-sm outline-none focus:ring-1 focus:ring-indigo-500/25 transition-all font-semibold disabled:opacity-30 disabled:cursor-not-allowed"
                                 />
@@ -1744,7 +2475,7 @@ export default function TeacherDashboard() {
                 onClick={() => !isSaving && setIsModalOpen(false)}
               ></div>
 
-              <div className="bg-slate-900 border border-slate-800 rounded-3xl w-full max-w-lg p-6 md:p-8 relative z-10 shadow-2xl animate-modalIn max-h-[90vh] flex flex-col">
+              <div ref={assignmentModalRef} className="bg-slate-900 border border-slate-800 rounded-3xl w-full max-w-lg p-6 md:p-8 relative z-10 shadow-2xl animate-modalIn max-h-[90vh] flex flex-col">
                 <div className="flex items-center justify-between pb-4 border-b border-slate-800">
                   <h3 className="text-xl font-extrabold text-white">Yangi vazifa yaratish</h3>
                   <button 
@@ -1807,7 +2538,7 @@ export default function TeacherDashboard() {
                       onChange={(e) => setAssignmentDeadline(e.target.value)}
                       disabled={isSaving}
                       required
-                      className="w-full bg-slate-955 bg-slate-950/60 border border-slate-800 text-white rounded-2xl py-3 px-4 text-sm outline-none focus:border-indigo-500 focus:ring-2 focus:ring-indigo-500/20 transition-all font-medium cursor-pointer"
+                      className="[color-scheme:dark] w-full bg-slate-955 bg-slate-950/60 border border-slate-800 text-white rounded-2xl py-3 px-4 text-sm outline-none focus:border-indigo-500 focus:ring-2 focus:ring-indigo-500/20 transition-all font-medium cursor-pointer"
                     />
                   </div>
 
@@ -1917,6 +2648,18 @@ export default function TeacherDashboard() {
                     )}
                   </div>
 
+                  <div>
+                    <label className="block text-slate-350 text-sm font-semibold mb-2 ml-1">
+                      Fayl biriktirish (Tanlovga ko'ra)
+                    </label>
+                    <input
+                      type="file"
+                      onChange={(e) => setSelectedFile(e.target.files[0] || null)}
+                      disabled={isSaving}
+                      className="w-full bg-slate-950/60 border border-slate-800 text-slate-300 rounded-2xl py-3 px-4 text-xs outline-none focus:border-indigo-500 focus:ring-2 focus:ring-indigo-500/20 transition-all font-medium cursor-pointer file:mr-4 file:py-1.5 file:px-3 file:rounded-xl file:border-0 file:text-xs file:font-bold file:bg-indigo-500/10 file:text-indigo-400 hover:file:bg-indigo-500/20"
+                    />
+                  </div>
+
                   <div className="border-t border-slate-800 pt-5 flex items-center justify-end gap-3">
                     <button
                       type="button"
@@ -1954,7 +2697,7 @@ export default function TeacherDashboard() {
                 onClick={() => !isReviewSaving && setIsReviewModalOpen(false)}
               ></div>
 
-              <div className="bg-slate-900 border border-slate-800 rounded-3xl w-full max-w-lg p-6 md:p-8 relative z-10 shadow-2xl animate-modalIn flex flex-col max-h-[90vh]">
+              <div ref={reviewModalRef} className="bg-slate-900 border border-slate-800 rounded-3xl w-full max-w-lg p-6 md:p-8 relative z-10 shadow-2xl animate-modalIn flex flex-col max-h-[90vh]">
                 
                 {/* Header (Sticky) */}
                 <div className="flex items-center justify-between pb-4 border-b border-slate-800 shrink-0">
@@ -1978,8 +2721,31 @@ export default function TeacherDashboard() {
                   
                   {/* Student Response */}
                   <div className="space-y-2">
+                    {selectedSubmission.assignments?.lesson_types?.name && (
+                      <div className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-indigo-500/10 border border-indigo-500/20 text-xs font-bold text-indigo-300">
+                        <span className="h-2 w-2 rounded-full bg-indigo-500 animate-pulse"></span>
+                        Dars turi: {selectedSubmission.assignments.lesson_types.name}
+                      </div>
+                    )}
                     <span className="block text-slate-400 text-xs font-bold uppercase tracking-wider">Talaba Javobi:</span>
                     {renderSolutionText(selectedSubmission.solution_text)}
+                    {selectedSubmission.file_url && (
+                      <div className="mt-2.5 p-3 rounded-2xl bg-indigo-500/5 border border-indigo-500/10 flex items-center justify-between">
+                        <div className="flex items-center gap-2 text-xs font-semibold text-slate-350">
+                          <Paperclip className="h-4 w-4 text-indigo-400" />
+                          <span>Yuborilgan fayl:</span>
+                        </div>
+                        <a
+                          href={selectedSubmission.file_url}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          className="inline-flex items-center gap-1.5 py-1.5 px-3 rounded-xl border border-indigo-500/20 bg-indigo-500/10 hover:bg-indigo-500/20 text-indigo-300 hover:text-white transition-all text-xs font-bold cursor-pointer"
+                        >
+                          <ExternalLink className="h-3.5 w-3.5" />
+                          <span>Faylni ko'rish/Yuklash</span>
+                        </a>
+                      </div>
+                    )}
                   </div>
 
                   {/* Submission date details */}
@@ -2067,9 +2833,10 @@ export default function TeacherDashboard() {
               </div>
             </div>
           )}
-
-        </main>
-      )}
+          </>
+        )}
+        </div>
+      </main>
     </div>
   );
 }

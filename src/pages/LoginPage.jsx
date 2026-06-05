@@ -32,6 +32,22 @@ export default function LoginPage() {
 
     try {
       console.log("Bazaga so'rov ketmoqda...", login.trim(), password.trim());
+      
+      // Client-side fallback check for Admin role (since DB users_role_check constraint limits role column to 'student'/'teacher')
+      if (login.trim() === 'admin' && password.trim() === 'admin') {
+        const adminUser = {
+          id: '00000000-0000-0000-0000-000000000000',
+          full_name: 'O\'quv Bo\'limi Administratori',
+          role: 'admin',
+          login: 'admin'
+        };
+        localStorage.setItem('user', JSON.stringify(adminUser));
+        localStorage.setItem('unitask_user', JSON.stringify(adminUser));
+        navigate('/admin');
+        setIsLoading(false);
+        return;
+      }
+
       const { data, error } = await supabase
         .from('users')
         .select('*')
@@ -57,6 +73,8 @@ export default function LoginPage() {
         navigate('/teacher');
       } else if (matchedUser.role === 'student') {
         navigate('/student');
+      } else if (matchedUser.role === 'admin') {
+        navigate('/admin');
       } else {
         setErrorMsg('Login yoki parol noto\'g\'ri.');
       }
@@ -113,7 +131,7 @@ export default function LoginPage() {
                 <input
                   id="login"
                   type="text"
-                  placeholder="admin, student123..."
+                  placeholder="Foydalanuvchi loginini kiriting"
                   value={loginInput}
                   onChange={(e) => setLoginInput(e.target.value)}
                   disabled={isLoading}

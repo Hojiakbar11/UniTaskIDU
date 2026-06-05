@@ -3,6 +3,7 @@ import { BrowserRouter, Routes, Route, Navigate } from 'react-router-dom';
 import LoginPage from './pages/LoginPage';
 import TeacherDashboard from './pages/TeacherDashboard';
 import StudentDashboard from './pages/StudentDashboard';
+import AdminDashboard from './pages/AdminDashboard';
 
 // ProtectedRoute: Auth holatini tekshiradi va foydalanuvchini faqat o'ziga ruxsat etilgan panelga yo'naltiradi
 function ProtectedRoute({ children, allowedRole }) {
@@ -16,7 +17,9 @@ function ProtectedRoute({ children, allowedRole }) {
     const user = JSON.parse(userString);
     if (allowedRole && user.role !== allowedRole) {
       // Boshqa panelga kirishga harakat qilsa, o'zining roliga mos keladiganiga qaytarib yuboramiz
-      return <Navigate to={user.role === 'teacher' ? '/teacher' : '/student'} replace />;
+      if (user.role === 'admin') return <Navigate to="/admin" replace />;
+      if (user.role === 'teacher') return <Navigate to="/teacher" replace />;
+      return <Navigate to="/student" replace />;
     }
   } catch (e) {
     localStorage.removeItem('unitask_user');
@@ -49,6 +52,16 @@ function App() {
           element={
             <ProtectedRoute allowedRole="student">
               <StudentDashboard />
+            </ProtectedRoute>
+          } 
+        />
+
+        {/* Himoyalangan Admin sahifasi */}
+        <Route 
+          path="/admin" 
+          element={
+            <ProtectedRoute allowedRole="admin">
+              <AdminDashboard />
             </ProtectedRoute>
           } 
         />
